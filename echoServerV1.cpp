@@ -4,10 +4,26 @@
 #include <netinet/in.h>
 #include <arpa/inet.h>
 #include <sys/socket.h>
+#include <csignal>
+#include <cerrno>
+#include <fcntl.h>
 
 #define PORT 8888
 #define BACKLOG 5
 #define BUFFER_SIZE 1024
+
+//use this flag to control the main loop of our server
+//so we can shutdown gracefully
+volatile sig_atomic_t keep_running = 1;
+
+void signal_handler(int signum)
+{
+    if(signum == SIGINT)
+    {
+        std::cout<<"\nSIGINT received. Shutting down gracefully...\n";
+        keep_running = 0;
+    }
+}
 
 int setup_server_socket(int port, int backlog)
 {
@@ -24,6 +40,7 @@ int setup_server_socket(int port, int backlog)
     if(setsockopt(fd, SOL_SOCKET, SO_REUSEADDR, &opt, sizeof(opt)) < 0)
     {
         perror("Setsockopt failed!!");
+        close(fd);
         return -1;
     }
 
@@ -50,10 +67,20 @@ int setup_server_socket(int port, int backlog)
         return -1;
     }
 
+    //set the server socket to non-blocking mode
+    int flags = fcntl(fd, F_GETFL, 0);
+    if(flags < 0 || fcntl(fd, F_SETFL, flags | O_NONBLOCK) < 0)
+    {
+        perror("Failed to set non-blocking mode on server socket :( !!");
+        close(fd);
+        return -1;
+    }
+
     return fd;
 }
 int main()
 {
+    std::signal(SIGINT, signal_handler);
     // int server_fd, client_fd;
     int server_fd = setup_server_socket(PORT, BACKLOG);
     if(server_fd < 0)
@@ -63,15 +90,21 @@ int main()
     }
 
     std::cout<<"Server listening on port "<<PORT<<" ...\n";
+
     sockaddr_in client_addr{};
     socklen_t client_len = sizeof(client_addr);
     char buffer[BUFFER_SIZE];
 
-    while(true)
+    while(keep_running)
     {
         int client_fd = accept(server_fd, (struct sockaddr*)&client_addr, &client_len);
         if(client_fd < 0)
         {
+            //no pending client, or interrupted => just continue
+            if(errno == EWOULDBLOCK || errno == EAGAIN || errno == EINTR)
+            {
+                continue;
+            }
             perror("Accept failed!!");
             continue;
         }
@@ -80,26 +113,52 @@ int main()
         inet_ntop(AF_INET, &client_addr.sin_addr, client_ip, INET_ADDRSTRLEN);
         std::cout<<"Client connected from "<<client_ip<<":"<<ntohs(client_addr.sin_port)<<"\n";
 
-        ssize_t n;
-        while((n = recv(client_fd, buffer, BUFFER_SIZE-1, 0)) > 0)
+        //make the client_fd also nonblocking
+        int client_flags = fcntl(client_fd, F_GETFL, 0);
+        if(client_flags < 0 || fcntl(client_fd, F_SETFL, client_flags | O_NONBLOCK) < 0)
         {
-            buffer[n] = '\0';
-            std::cout<<"Received: "<<buffer<<std::endl;
-            send(client_fd, buffer, n, 0);
+            perror("Failed to set non-blocking mode on client_fd :( !!");
+            close(client_fd);
+            continue;
         }
 
-        if(n == 0)
+        ssize_t n;
+        while(keep_running)
         {
-            std::cout<<"Client disconnected!!\n";
-        }
-        else if(n < 0)
-        {
-            perror("Recv failed!!");
+            n = recv(client_fd, buffer, BUFFER_SIZE - 1, 0);
+            if(n > 0)
+            {
+                buffer[n] = '\0';
+                std::cout<<"Received: "<<buffer<<std::endl;
+                send(client_fd, buffer, n, 0);
+            }
+            else if(n == 0)
+            {
+                std::cout<<"Client disconnected!!\n";
+                break;
+            }
+            else
+            {
+                if(errno == EWOULDBLOCK || errno == EAGAIN)
+                {
+                    continue;
+                }
+                else if(errno == EINTR)
+                {
+                    break;
+                }
+                else
+                {
+                    perror("Recv failed!!");
+                    break;
+                }
+            }
         }
 
         close(client_fd);
     }
     close(server_fd);
+    std::cout<<"Server has shut down gracefully...\n";
     return 0;
 }
 
