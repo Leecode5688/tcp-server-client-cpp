@@ -62,7 +62,7 @@ int main()
             perror("Send failed!!");
             break;
         }
-
+        message += "\n";
         //receive echo from server
         ssize_t n = recv(sock_fd, buffer, BUFFER_SIZE-1, 0);
 
