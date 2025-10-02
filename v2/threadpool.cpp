@@ -1,6 +1,10 @@
 #include "threadpool.h"
 #include <unistd.h>
 #include <sys/eventfd.h>
+#include <iostream>
+
+//global mutex to protect std::cout
+std::mutex log_mtx;
 
 //initialize the thread pool with a specified number of worker threads
 //initialize the notify_fd with the provided file descriptor
@@ -77,6 +81,14 @@ void ThreadPool::worker_loop()
         if(!conn || conn->closed.load()) continue;
 
         std::string response = "Echo: " + message;
+
+        {
+            std::lock_guard<std::mutex> lk(log_mtx);
+            std::cout<<"Client [fd = " << conn->fd << "]: "
+            <<response.substr(0, response.size() - 1)<<std::endl;
+
+        }
+        
         //lock the connection's mutex to safely append the response to buffer
         {
             std::lock_guard<std::mutex> lk(conn->mtx);
