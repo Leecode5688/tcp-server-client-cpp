@@ -54,6 +54,7 @@ int main()
         std::getline(std::cin, message);
 
         if(message == "exit") break;
+        message += "\n";
         
         //send to server
         //TCP => need to specify message size
@@ -62,7 +63,6 @@ int main()
             perror("Send failed!!");
             break;
         }
-        message += "\n";
         //receive echo from server
         ssize_t n = recv(sock_fd, buffer, BUFFER_SIZE-1, 0);
 
