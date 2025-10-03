@@ -22,6 +22,7 @@ private:
     void handle_write(ConnPtr conn);
     void close_conn(ConnPtr conn);
     void handle_pending_writes();
+    void handle_broadcasts();
 
     int port_;
     int n_workers_;
@@ -36,10 +37,14 @@ private:
     std::unordered_map<int, ConnPtr> connections_;
     std::mutex conn_map_mtx_;
 
+    std::queue<std::string> broadcast_queue_;
+    std::mutex broadcast_mtx_;
+
 public:
     WebServer(int port, int n_workers = 5);
     ~WebServer();
 
     void run();
     void stop();
+    void queue_broadcast_message(const std::string& msg);
 };

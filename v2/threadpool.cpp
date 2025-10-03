@@ -1,4 +1,5 @@
 #include "threadpool.h"
+#include "webserver.h"
 #include <unistd.h>
 #include <sys/eventfd.h>
 #include <iostream>
@@ -8,8 +9,11 @@ std::mutex log_mtx;
 
 //initialize the thread pool with a specified number of worker threads
 //initialize the notify_fd with the provided file descriptor
-ThreadPool::ThreadPool(size_t n_workers, int notify_fd) : notify_fd_(notify_fd)
+// ThreadPool::ThreadPool(size_t n_workers, int notify_fd) : notify_fd_(notify_fd)
+ThreadPool::ThreadPool(size_t n_workers, int notify_fd, WebServer& server) : 
+    notify_fd_(notify_fd), server_(server)
 {
+    workers_.reserve(n_workers);
     for(size_t i = 0; i < n_workers; i++)
     {
         workers_.emplace_back(
@@ -54,8 +58,7 @@ void ThreadPool::shutdown()
     }
 }
 
-//the worker thread's main loop
-
+//the worker thread's main loop for broadcasting
 void ThreadPool::worker_loop()
 {
     while(running_)
@@ -80,20 +83,26 @@ void ThreadPool::worker_loop()
 
         if(!conn || conn->closed.load()) continue;
 
-        std::string response = "Echo: " + message;
+        // std::string response = "Echo: " + message;
 
-        {
-            std::lock_guard<std::mutex> lk(log_mtx);
-            std::cout<<"Client [fd = " << conn->fd << "]: "
-            <<response.substr(0, response.size() - 1)<<std::endl;
+        // {
+        //     std::lock_guard<std::mutex> lk(log_mtx);
+        //     std::cout<<"Client [fd = " << conn->fd << "]: "
+        //     <<response.substr(0, response.size() - 1)<<std::endl;
 
-        }
+        // }
         
-        //lock the connection's mutex to safely append the response to buffer
-        {
-            std::lock_guard<std::mutex> lk(conn->mtx);
-            conn->out_buf += response;
-        }
+        // //lock the connection's mutex to safely append the response to buffer
+        // {
+        //     std::lock_guard<std::mutex> lk(conn->mtx);
+        //     conn->out_buf += response;
+        // }
+
+        std::string broadcast_msg = "[Client " + std::to_string(conn->fd) + "]: " + 
+        message.substr(0, message.size()-1) + "\n";
+
+        server_.queue_broadcast_message(broadcast_msg);
+
         //notify the event loop
         uint64_t one = 1;
         write(notify_fd_, &one, sizeof(one));

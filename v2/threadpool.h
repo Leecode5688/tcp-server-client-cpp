@@ -8,6 +8,8 @@
 #include <atomic>
 #include <string>
 
+class WebServer;
+
 class ThreadPool {
 private: 
     void worker_loop();
@@ -22,9 +24,11 @@ private:
     std::atomic<bool> running_{true};
     //the event fd to notify the main epoll loop
     int notify_fd_;
+
+    WebServer& server_;
     
 public: 
-    ThreadPool(size_t n_workers, int notify_fd);
+    ThreadPool(size_t n_workers, int notify_fd, WebServer& server);
     ~ThreadPool();
     //add new task to the queue for a worker to process
     void push_task(ConnPtr conn, std::string msg);

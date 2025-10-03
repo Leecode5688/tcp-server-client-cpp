@@ -24,12 +24,47 @@ WebServer::WebServer(int port, int n_workers) :
     setup_server_socket();
     setup_epoll();
     setup_eventfd();
-    threadpool_ = std::make_unique<ThreadPool>(n_workers_, notify_fd_);
+    threadpool_ = std::make_unique<ThreadPool>(n_workers_, notify_fd_, *this);
 }
 
 //destructor
 WebServer::~WebServer(){
     stop();
+}
+
+void WebServer::queue_broadcast_message(const std::string& msg)
+{
+    std::lock_guard<std::mutex> lk(broadcast_mtx_);
+    broadcast_queue_.push(msg);
+}
+
+void WebServer::handle_broadcasts(){
+    std::vector<std::string> messages_to_send;
+    {
+        std::lock_guard<std::mutex> lk(broadcast_mtx_);
+        while(!broadcast_queue_.empty())
+        {
+            messages_to_send.push_back(std::move(broadcast_queue_.front()));
+            broadcast_queue_.pop();
+        }
+    }
+
+    if(messages_to_send.empty()) return;
+
+    std::lock_guard<std::mutex> lk(conn_map_mtx_);
+    for(const auto& msg : messages_to_send)
+    {
+        for(auto& pair : connections_)
+        {
+            ConnPtr conn = pair.second;
+            if(conn && !conn->closed.load())
+            {
+                std::lock_guard<std::mutex> conn_lk(conn->mtx);
+                conn->out_buf += msg;
+                mod_fd_epoll(conn->fd, EPOLLIN | EPOLLOUT);
+            }
+        }
+    }
 }
 
 //handle signals without using a global signal handler
@@ -83,7 +118,7 @@ void WebServer::setup_server_socket()
     server_addr.sin_addr.s_addr = htonl(INADDR_ANY);
     //set the port number of the server
     server_addr.sin_port = htons(port_);
-   
+
     //binding socket to address
     if(bind(listen_fd_, (sockaddr*)&server_addr, sizeof(server_addr)) < 0)
     {
@@ -191,7 +226,7 @@ void WebServer::accept_loop()
         {
             std::lock_guard<std::mutex> lk(conn_map_mtx_);
             connections_[client_fd] = conn;
-        } //lock_guard goes out of scope and unlocks here
+        }
 
         //add the new client socket to the epoll instance
         //EPOLLIN to monitor for incoming data
@@ -202,6 +237,13 @@ void WebServer::accept_loop()
         inet_ntop(AF_INET, &client_addr.sin_addr, ip, sizeof(ip));
         std::cout<<"Accepted "<<ip<<":"<<ntohs(client_addr.sin_port)
             <<" fd = "<<client_fd<<"\n";
+
+        //broadcast when a client has joined
+        std::string join_msg = "[Server]: Client "+std::to_string(client_fd)+" has joined the chatroom.\n";
+        queue_broadcast_message(join_msg);
+
+        uint64_t one = 1;
+        write(notify_fd_, &one, sizeof(one));
     }
 }
 
@@ -265,6 +307,14 @@ void WebServer::handle_write(ConnPtr conn)
 void WebServer::close_conn(ConnPtr conn)
 {
     if(conn->closed.exchange(true)) return;
+
+    //broadcast that a client has left
+    std::string leave_msg = "[Server]: Client "+std::to_string(conn->fd)+" has left the chatroom.\n";
+
+    queue_broadcast_message(leave_msg);
+    uint64_t one = 1;
+    write(notify_fd_, &one, sizeof(one));
+
     epoll_ctl(epoll_fd_, EPOLL_CTL_DEL, conn->fd, nullptr);
     close(conn->fd);
     {
@@ -297,7 +347,7 @@ void WebServer::handle_pending_writes()
 //repeatedly calls epoll_wait, dispatches events to handlers
 void WebServer::run()
 {
-    std::cout<<"Server listening on port "<<port_<<"...\n";
+    std::cout<<"Chat server listening on port "<<port_<<"... :)\n";
     struct epoll_event events[MAX_EVENTS];
 
     while(running_)
@@ -338,7 +388,8 @@ void WebServer::run()
             {
                 uint64_t cnt;
                 read(notify_fd_, &cnt, sizeof(cnt));
-                handle_pending_writes();
+                handle_broadcasts();
+                //handle_pending_writes();
             }
             else
             {

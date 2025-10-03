@@ -1,7 +1,7 @@
 cmake_minimum_required(VERSION 3.10)
 
 # Project name and language
-project(EchoServer VERSION 1.0 LANGUAGES CXX)
+project(ReactorServer VERSION 1.0 LANGUAGES CXX)
 
 # Set C++ standard
 set(CMAKE_CXX_STANDARD 17)
@@ -27,12 +27,7 @@ target_compile_options(echo_server PRIVATE -Wall -Wextra -pedantic)
 find_package(Threads REQUIRED)
 target_link_libraries(echo_server PRIVATE Threads::Threads)
 
-#------------ FOR TEST CLIENT --------------
-add_executable(test_client testClient.cpp)
-target_compile_options(test_client PRIVATE -Wall -Wextra -pedantic)
-target_link_libraries(test_client PRIVATE Threads::Threads)
-
 #------------ FOR CLIENT --------------
-add_executable(client client.cpp)
-target_compile_options(client PRIVATE -Wall -Wextra -pedantic)
-target_link_libraries(client PRIVATE Threads::Threads)
+add_executable(chat_client chat_client.cpp)
+target_compile_options(chat_client PRIVATE -Wall -Wextra -pedantic)
+target_link_libraries(chat_client PRIVATE Threads::Threads)

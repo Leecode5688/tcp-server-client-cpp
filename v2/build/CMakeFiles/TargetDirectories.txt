@@ -1,0 +1,4 @@
+/home/gj-lee/Desktop/socket/v2/build/CMakeFiles/echo_server.dir
+/home/gj-lee/Desktop/socket/v2/build/CMakeFiles/chat_client.dir
+/home/gj-lee/Desktop/socket/v2/build/CMakeFiles/edit_cache.dir
+/home/gj-lee/Desktop/socket/v2/build/CMakeFiles/rebuild_cache.dir
