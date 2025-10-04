@@ -6,11 +6,13 @@
 #include <sys/socket.h>
 #include <thread>
 #include <atomic>
+#include <mutex>
 
 #define PORT 8888
 #define SERVER_IP "127.0.0.1"
 #define BUFFER_SIZE 4096
 
+std::mutex stdout_mtx;
 std::atomic<bool> keep_running_client{true};
 
 int setup_client_socket(const char* ip, int port)
@@ -55,17 +57,18 @@ void receive_messages(int sock_fd) {
             {
                 received_msg.pop_back();
             }
+            std::lock_guard<std::mutex> lock(stdout_mtx);
             std::cout<<"\r\033[K"<<received_msg<<std::endl;
             std::cout<<"Enter message > "<<std::flush;
         }
         else
         {
-            if(!keep_running_client)
+            if(keep_running_client)
             {
-                break;
+                std::lock_guard<std::mutex> lock(stdout_mtx);
+                std::cout<<"\r\033[KServer connection lost!"<<std::endl;
+                keep_running_client = false;
             }
-            std::cout<<"\r\033[KServer connection lost!"<<std::endl;
-            keep_running_client = false;
             break;
         }
     }
@@ -87,7 +90,10 @@ int main()
     std::thread receiver_thread(receive_messages, sock_fd);
 
     std::string line;
-    std::cout<<"Enter message > "<<std::flush;
+    {
+        std::lock_guard<std::mutex> lock(stdout_mtx);
+        std::cout<<"Enter message > "<<std::flush;
+    }
     while(keep_running_client && std::getline(std::cin, line))
     {
         if(line == "exit")
@@ -103,6 +109,7 @@ int main()
                 break;
             }
         }
+        std::lock_guard<std::mutex> lock(stdout_mtx);
         std::cout<<"Enter message > "<<std::flush;
     }
 
