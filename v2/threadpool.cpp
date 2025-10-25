@@ -9,7 +9,6 @@ std::mutex log_mtx;
 
 //initialize the thread pool with a specified number of worker threads
 //initialize the notify_fd with the provided file descriptor
-// ThreadPool::ThreadPool(size_t n_workers, int notify_fd) : notify_fd_(notify_fd)
 ThreadPool::ThreadPool(size_t n_workers, int notify_fd, WebServer& server) : 
     notify_fd_(notify_fd), server_(server)
 {
@@ -17,8 +16,7 @@ ThreadPool::ThreadPool(size_t n_workers, int notify_fd, WebServer& server) :
     for(size_t i = 0; i < n_workers; i++)
     {
         workers_.emplace_back(
-            [this]{ this->worker_loop(); }
-        );
+            [this]{ this->worker_loop(); });
     }
 }
 
@@ -81,27 +79,12 @@ void ThreadPool::worker_loop()
         ConnPtr conn = task.first;
         std::string& message = task.second;
 
-        if(!conn || conn->closed.load()) continue;
-
-        // std::string response = "Echo: " + message;
-
-        // {
-        //     std::lock_guard<std::mutex> lk(log_mtx);
-        //     std::cout<<"Client [fd = " << conn->fd << "]: "
-        //     <<response.substr(0, response.size() - 1)<<std::endl;
-
-        // }
+        if(!conn || conn->closed.load() || conn->username.empty()) continue;
         
-        // //lock the connection's mutex to safely append the response to buffer
-        // {
-        //     std::lock_guard<std::mutex> lk(conn->mtx);
-        //     conn->out_buf += response;
-        // }
-
-        std::string broadcast_msg = "[Client " + std::to_string(conn->fd) + "]: " + 
+        std::string broadcast_msg = "["+ conn->username + "]: "+ 
         message.substr(0, message.size()-1) + "\n";
 
-        server_.queue_broadcast_message(broadcast_msg);
+        server_.queue_broadcast_message(broadcast_msg, conn->fd);
 
         //notify the event loop
         uint64_t one = 1;
