@@ -1,0 +1,1 @@
+/usr/bin/c++  -Wall -Wextra -pedantic -Wl,--dependency-file=CMakeFiles/main_epoll_client.cpp.dir/link.d CMakeFiles/main_epoll_client.cpp.dir/client.cpp.o -o main_epoll_client.cpp

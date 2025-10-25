@@ -117,37 +117,50 @@ depend:
 .PHONY : depend
 
 #=============================================================================
-# Target rules for targets named echo_server
+# Target rules for targets named chat_server
 
 # Build rule for target.
-echo_server: cmake_check_build_system
-	$(MAKE) $(MAKESILENT) -f CMakeFiles/Makefile2 echo_server
-.PHONY : echo_server
+chat_server: cmake_check_build_system
+	$(MAKE) $(MAKESILENT) -f CMakeFiles/Makefile2 chat_server
+.PHONY : chat_server
 
 # fast build rule for target.
-echo_server/fast:
-	$(MAKE) $(MAKESILENT) -f CMakeFiles/echo_server.dir/build.make CMakeFiles/echo_server.dir/build
-.PHONY : echo_server/fast
+chat_server/fast:
+	$(MAKE) $(MAKESILENT) -f CMakeFiles/chat_server.dir/build.make CMakeFiles/chat_server.dir/build
+.PHONY : chat_server/fast
 
 #=============================================================================
-# Target rules for targets named chat_client
+# Target rules for targets named chat_client_mt
 
 # Build rule for target.
-chat_client: cmake_check_build_system
-	$(MAKE) $(MAKESILENT) -f CMakeFiles/Makefile2 chat_client
-.PHONY : chat_client
+chat_client_mt: cmake_check_build_system
+	$(MAKE) $(MAKESILENT) -f CMakeFiles/Makefile2 chat_client_mt
+.PHONY : chat_client_mt
 
 # fast build rule for target.
-chat_client/fast:
-	$(MAKE) $(MAKESILENT) -f CMakeFiles/chat_client.dir/build.make CMakeFiles/chat_client.dir/build
-.PHONY : chat_client/fast
+chat_client_mt/fast:
+	$(MAKE) $(MAKESILENT) -f CMakeFiles/chat_client_mt.dir/build.make CMakeFiles/chat_client_mt.dir/build
+.PHONY : chat_client_mt/fast
+
+#=============================================================================
+# Target rules for targets named epoll_client
+
+# Build rule for target.
+epoll_client: cmake_check_build_system
+	$(MAKE) $(MAKESILENT) -f CMakeFiles/Makefile2 epoll_client
+.PHONY : epoll_client
+
+# fast build rule for target.
+epoll_client/fast:
+	$(MAKE) $(MAKESILENT) -f CMakeFiles/epoll_client.dir/build.make CMakeFiles/epoll_client.dir/build
+.PHONY : epoll_client/fast
 
 chat_client.o: chat_client.cpp.o
 .PHONY : chat_client.o
 
 # target to build an object file
 chat_client.cpp.o:
-	$(MAKE) $(MAKESILENT) -f CMakeFiles/chat_client.dir/build.make CMakeFiles/chat_client.dir/chat_client.cpp.o
+	$(MAKE) $(MAKESILENT) -f CMakeFiles/chat_client_mt.dir/build.make CMakeFiles/chat_client_mt.dir/chat_client.cpp.o
 .PHONY : chat_client.cpp.o
 
 chat_client.i: chat_client.cpp.i
@@ -155,7 +168,7 @@ chat_client.i: chat_client.cpp.i
 
 # target to preprocess a source file
 chat_client.cpp.i:
-	$(MAKE) $(MAKESILENT) -f CMakeFiles/chat_client.dir/build.make CMakeFiles/chat_client.dir/chat_client.cpp.i
+	$(MAKE) $(MAKESILENT) -f CMakeFiles/chat_client_mt.dir/build.make CMakeFiles/chat_client_mt.dir/chat_client.cpp.i
 .PHONY : chat_client.cpp.i
 
 chat_client.s: chat_client.cpp.s
@@ -163,15 +176,39 @@ chat_client.s: chat_client.cpp.s
 
 # target to generate assembly for a file
 chat_client.cpp.s:
-	$(MAKE) $(MAKESILENT) -f CMakeFiles/chat_client.dir/build.make CMakeFiles/chat_client.dir/chat_client.cpp.s
+	$(MAKE) $(MAKESILENT) -f CMakeFiles/chat_client_mt.dir/build.make CMakeFiles/chat_client_mt.dir/chat_client.cpp.s
 .PHONY : chat_client.cpp.s
+
+client.o: client.cpp.o
+.PHONY : client.o
+
+# target to build an object file
+client.cpp.o:
+	$(MAKE) $(MAKESILENT) -f CMakeFiles/epoll_client.dir/build.make CMakeFiles/epoll_client.dir/client.cpp.o
+.PHONY : client.cpp.o
+
+client.i: client.cpp.i
+.PHONY : client.i
+
+# target to preprocess a source file
+client.cpp.i:
+	$(MAKE) $(MAKESILENT) -f CMakeFiles/epoll_client.dir/build.make CMakeFiles/epoll_client.dir/client.cpp.i
+.PHONY : client.cpp.i
+
+client.s: client.cpp.s
+.PHONY : client.s
+
+# target to generate assembly for a file
+client.cpp.s:
+	$(MAKE) $(MAKESILENT) -f CMakeFiles/epoll_client.dir/build.make CMakeFiles/epoll_client.dir/client.cpp.s
+.PHONY : client.cpp.s
 
 main.o: main.cpp.o
 .PHONY : main.o
 
 # target to build an object file
 main.cpp.o:
-	$(MAKE) $(MAKESILENT) -f CMakeFiles/echo_server.dir/build.make CMakeFiles/echo_server.dir/main.cpp.o
+	$(MAKE) $(MAKESILENT) -f CMakeFiles/chat_server.dir/build.make CMakeFiles/chat_server.dir/main.cpp.o
 .PHONY : main.cpp.o
 
 main.i: main.cpp.i
@@ -179,7 +216,7 @@ main.i: main.cpp.i
 
 # target to preprocess a source file
 main.cpp.i:
-	$(MAKE) $(MAKESILENT) -f CMakeFiles/echo_server.dir/build.make CMakeFiles/echo_server.dir/main.cpp.i
+	$(MAKE) $(MAKESILENT) -f CMakeFiles/chat_server.dir/build.make CMakeFiles/chat_server.dir/main.cpp.i
 .PHONY : main.cpp.i
 
 main.s: main.cpp.s
@@ -187,15 +224,39 @@ main.s: main.cpp.s
 
 # target to generate assembly for a file
 main.cpp.s:
-	$(MAKE) $(MAKESILENT) -f CMakeFiles/echo_server.dir/build.make CMakeFiles/echo_server.dir/main.cpp.s
+	$(MAKE) $(MAKESILENT) -f CMakeFiles/chat_server.dir/build.make CMakeFiles/chat_server.dir/main.cpp.s
 .PHONY : main.cpp.s
+
+main_epoll_client.o: main_epoll_client.cpp.o
+.PHONY : main_epoll_client.o
+
+# target to build an object file
+main_epoll_client.cpp.o:
+	$(MAKE) $(MAKESILENT) -f CMakeFiles/epoll_client.dir/build.make CMakeFiles/epoll_client.dir/main_epoll_client.cpp.o
+.PHONY : main_epoll_client.cpp.o
+
+main_epoll_client.i: main_epoll_client.cpp.i
+.PHONY : main_epoll_client.i
+
+# target to preprocess a source file
+main_epoll_client.cpp.i:
+	$(MAKE) $(MAKESILENT) -f CMakeFiles/epoll_client.dir/build.make CMakeFiles/epoll_client.dir/main_epoll_client.cpp.i
+.PHONY : main_epoll_client.cpp.i
+
+main_epoll_client.s: main_epoll_client.cpp.s
+.PHONY : main_epoll_client.s
+
+# target to generate assembly for a file
+main_epoll_client.cpp.s:
+	$(MAKE) $(MAKESILENT) -f CMakeFiles/epoll_client.dir/build.make CMakeFiles/epoll_client.dir/main_epoll_client.cpp.s
+.PHONY : main_epoll_client.cpp.s
 
 threadpool.o: threadpool.cpp.o
 .PHONY : threadpool.o
 
 # target to build an object file
 threadpool.cpp.o:
-	$(MAKE) $(MAKESILENT) -f CMakeFiles/echo_server.dir/build.make CMakeFiles/echo_server.dir/threadpool.cpp.o
+	$(MAKE) $(MAKESILENT) -f CMakeFiles/chat_server.dir/build.make CMakeFiles/chat_server.dir/threadpool.cpp.o
 .PHONY : threadpool.cpp.o
 
 threadpool.i: threadpool.cpp.i
@@ -203,7 +264,7 @@ threadpool.i: threadpool.cpp.i
 
 # target to preprocess a source file
 threadpool.cpp.i:
-	$(MAKE) $(MAKESILENT) -f CMakeFiles/echo_server.dir/build.make CMakeFiles/echo_server.dir/threadpool.cpp.i
+	$(MAKE) $(MAKESILENT) -f CMakeFiles/chat_server.dir/build.make CMakeFiles/chat_server.dir/threadpool.cpp.i
 .PHONY : threadpool.cpp.i
 
 threadpool.s: threadpool.cpp.s
@@ -211,7 +272,7 @@ threadpool.s: threadpool.cpp.s
 
 # target to generate assembly for a file
 threadpool.cpp.s:
-	$(MAKE) $(MAKESILENT) -f CMakeFiles/echo_server.dir/build.make CMakeFiles/echo_server.dir/threadpool.cpp.s
+	$(MAKE) $(MAKESILENT) -f CMakeFiles/chat_server.dir/build.make CMakeFiles/chat_server.dir/threadpool.cpp.s
 .PHONY : threadpool.cpp.s
 
 webserver.o: webserver.cpp.o
@@ -219,7 +280,7 @@ webserver.o: webserver.cpp.o
 
 # target to build an object file
 webserver.cpp.o:
-	$(MAKE) $(MAKESILENT) -f CMakeFiles/echo_server.dir/build.make CMakeFiles/echo_server.dir/webserver.cpp.o
+	$(MAKE) $(MAKESILENT) -f CMakeFiles/chat_server.dir/build.make CMakeFiles/chat_server.dir/webserver.cpp.o
 .PHONY : webserver.cpp.o
 
 webserver.i: webserver.cpp.i
@@ -227,7 +288,7 @@ webserver.i: webserver.cpp.i
 
 # target to preprocess a source file
 webserver.cpp.i:
-	$(MAKE) $(MAKESILENT) -f CMakeFiles/echo_server.dir/build.make CMakeFiles/echo_server.dir/webserver.cpp.i
+	$(MAKE) $(MAKESILENT) -f CMakeFiles/chat_server.dir/build.make CMakeFiles/chat_server.dir/webserver.cpp.i
 .PHONY : webserver.cpp.i
 
 webserver.s: webserver.cpp.s
@@ -235,7 +296,7 @@ webserver.s: webserver.cpp.s
 
 # target to generate assembly for a file
 webserver.cpp.s:
-	$(MAKE) $(MAKESILENT) -f CMakeFiles/echo_server.dir/build.make CMakeFiles/echo_server.dir/webserver.cpp.s
+	$(MAKE) $(MAKESILENT) -f CMakeFiles/chat_server.dir/build.make CMakeFiles/chat_server.dir/webserver.cpp.s
 .PHONY : webserver.cpp.s
 
 # Help Target
@@ -246,14 +307,21 @@ help:
 	@echo "... depend"
 	@echo "... edit_cache"
 	@echo "... rebuild_cache"
-	@echo "... chat_client"
-	@echo "... echo_server"
+	@echo "... chat_client_mt"
+	@echo "... chat_server"
+	@echo "... epoll_client"
 	@echo "... chat_client.o"
 	@echo "... chat_client.i"
 	@echo "... chat_client.s"
+	@echo "... client.o"
+	@echo "... client.i"
+	@echo "... client.s"
 	@echo "... main.o"
 	@echo "... main.i"
 	@echo "... main.s"
+	@echo "... main_epoll_client.o"
+	@echo "... main_epoll_client.i"
+	@echo "... main_epoll_client.s"
 	@echo "... threadpool.o"
 	@echo "... threadpool.i"
 	@echo "... threadpool.s"

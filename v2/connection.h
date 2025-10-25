@@ -4,10 +4,18 @@
 #include <atomic>
 #include <memory>
 
+//add a state for username feature
+enum class ConnState {
+    AWAITING_USERNAME, 
+    ACTIVE
+};
+
 //a structure that holds the state associated with each active client connection
 struct Connection {
     //file descriptor for the connection
     int fd;
+    std::string username;
+    ConnState state = ConnState::AWAITING_USERNAME;
     //in_buf stores the data from the socket that hasn't been processed yet
     //out_buf stores the data that is ready to be sent to the client
     std::string in_buf;

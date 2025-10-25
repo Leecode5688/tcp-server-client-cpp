@@ -32,14 +32,15 @@ WebServer::~WebServer(){
     stop();
 }
 
-void WebServer::queue_broadcast_message(const std::string& msg)
+void WebServer::queue_broadcast_message(const std::string& msg, int sender_fd)
 {
     std::lock_guard<std::mutex> lk(broadcast_mtx_);
-    broadcast_queue_.push(msg);
+    // broadcast_queue_.push(msg);
+    broadcast_queue_.push({msg, sender_fd});
 }
 
 void WebServer::handle_broadcasts(){
-    std::vector<std::string> messages_to_send;
+    std::vector<std::pair<std::string, int>> messages_to_send;
     {
         std::lock_guard<std::mutex> lk(broadcast_mtx_);
         while(!broadcast_queue_.empty())
@@ -52,12 +53,18 @@ void WebServer::handle_broadcasts(){
     if(messages_to_send.empty()) return;
 
     std::lock_guard<std::mutex> lk(conn_map_mtx_);
-    for(const auto& msg : messages_to_send)
+
+    for(const auto& msg_pair : messages_to_send)
     {
-        for(auto& pair : connections_)
+        const std::string& msg = msg_pair.first;
+        int sender_fd = msg_pair.second;
+
+        for(auto& conn_pair : connections_)
         {
-            ConnPtr conn = pair.second;
-            if(conn && !conn->closed.load())
+            if(conn_pair.first == sender_fd) continue;
+
+            ConnPtr conn = conn_pair.second;
+            if(conn && !conn->closed.load() && conn->state == ConnState::ACTIVE)
             {
                 std::lock_guard<std::mutex> conn_lk(conn->mtx);
                 conn->out_buf += msg;
@@ -79,7 +86,11 @@ void WebServer::setup_signalfd()
     sigaddset(&mask, SIGTERM);
     //block the signals in the set for the entire process
     //so they can be handled via signalfd
-    sigprocmask(SIG_BLOCK, &mask, nullptr);
+    if(sigprocmask(SIG_BLOCK, &mask, nullptr) == -1)
+    {
+        perror("sigprocmask");
+        exit(1);
+    }
     //create a file descriptor for signal handling
     //make it non-blocking and close-on-exec
     //this fd will be monitored in the epoll loop
@@ -238,12 +249,14 @@ void WebServer::accept_loop()
         std::cout<<"Accepted "<<ip<<":"<<ntohs(client_addr.sin_port)
             <<" fd = "<<client_fd<<"\n";
 
-        //broadcast when a client has joined
-        std::string join_msg = "[Server]: Client "+std::to_string(client_fd)+" has joined the chatroom.\n";
-        queue_broadcast_message(join_msg);
+        // std::string join_msg = "[Server]: Client "+std::to_string(client_fd)+" has joined the chatroom.\n";
+        // queue_broadcast_message(join_msg);
 
-        uint64_t one = 1;
-        write(notify_fd_, &one, sizeof(one));
+        std::string welcomeMessage = "[Server]: Welcome! Please enter your username: ";
+        send(client_fd, welcomeMessage.c_str(), welcomeMessage.size(), 0);
+
+        // uint64_t one = 1;
+        // write(notify_fd_, &one, sizeof(one));
     }
 }
 
@@ -262,7 +275,46 @@ void WebServer::handle_read(ConnPtr conn)
             {
                 std::string line = conn->in_buf.substr(0, pos+1);
                 conn->in_buf.erase(0, pos+1);
-                threadpool_->push_task(conn, line);
+
+                if(conn->state == ConnState::AWAITING_USERNAME)
+                {
+                    std::string enteredName = line.substr(0, line.size()-1);
+                    bool validName = false;
+                    {
+                        std::lock_guard<std::mutex> map_lk(conn_map_mtx_);
+                        if(!usernames_.count(enteredName) && !enteredName.empty())
+                        {
+                            usernames_.insert(enteredName);
+                            validName = true;
+                        }
+                    }
+
+                    if(validName)
+                    {
+                        conn->username = enteredName;
+                        conn->state = ConnState::ACTIVE;
+                        std::string validMessage = "[Server]: Username accepted! You have entered the chat!\n";
+                        send(conn->fd, validMessage.c_str(), validMessage.size(), 0);
+
+                        std::string joinMessage = "[Server]: " + conn->username + " has joined the chatroom!\n";
+                        //use sender fd = -1 for broadcasting to all
+                        queue_broadcast_message(joinMessage, -1);
+
+                        uint64_t one = 1;
+                        write(notify_fd_, &one, sizeof(one));
+                    }
+                    else
+                    {
+                        std::string errorMessage = "[Server]: Username is invalid or already used. Please try another one.\n";
+                        send(conn->fd, errorMessage.c_str(), errorMessage.size(), 0);
+                    }
+                }
+                else if(conn->state == ConnState::ACTIVE)
+                {
+                    threadpool_->push_task(conn, line + '\n');
+                }
+
+                // threadpool_->push_task(conn, line);
             }
         }
         else if(n == 0)
@@ -309,11 +361,23 @@ void WebServer::close_conn(ConnPtr conn)
     if(conn->closed.exchange(true)) return;
 
     //broadcast that a client has left
-    std::string leave_msg = "[Server]: Client "+std::to_string(conn->fd)+" has left the chatroom.\n";
+    // std::string leave_msg = "[Server]: Client "+std::to_string(conn->fd)+" has left the chatroom.\n";
 
-    queue_broadcast_message(leave_msg);
-    uint64_t one = 1;
-    write(notify_fd_, &one, sizeof(one));
+    std::string leave_msg;
+
+    if(!conn->username.empty())
+    {
+        leave_msg = "[Server]: " + conn->username + " has left the chatroom.\n";
+        std::lock_guard<std::mutex> map_lk(conn_map_mtx_);
+        usernames_.erase(conn->username);
+    }
+
+    if(!leave_msg.empty())
+    {
+        queue_broadcast_message(leave_msg, -1);
+        uint64_t one = 1;
+        write(notify_fd_, &one, sizeof(one));
+    }
 
     epoll_ctl(epoll_fd_, EPOLL_CTL_DEL, conn->fd, nullptr);
     close(conn->fd);

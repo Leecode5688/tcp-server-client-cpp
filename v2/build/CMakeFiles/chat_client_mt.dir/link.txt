@@ -1,0 +1,1 @@
+/usr/bin/c++  -Wall -Wextra -pedantic -Wl,--dependency-file=CMakeFiles/chat_client_mt.dir/link.d CMakeFiles/chat_client_mt.dir/chat_client.cpp.o -o chat_client_mt

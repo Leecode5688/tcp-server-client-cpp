@@ -63,13 +63,15 @@ CMAKE_BINARY_DIR = /home/gj-lee/Desktop/socket/v2/build
 # Directory level rules for the build root directory
 
 # The main recursive "all" target.
-all: CMakeFiles/echo_server.dir/all
-all: CMakeFiles/chat_client.dir/all
+all: CMakeFiles/chat_server.dir/all
+all: CMakeFiles/chat_client_mt.dir/all
+all: CMakeFiles/epoll_client.dir/all
 .PHONY : all
 
 # The main recursive "codegen" target.
-codegen: CMakeFiles/echo_server.dir/codegen
-codegen: CMakeFiles/chat_client.dir/codegen
+codegen: CMakeFiles/chat_server.dir/codegen
+codegen: CMakeFiles/chat_client_mt.dir/codegen
+codegen: CMakeFiles/epoll_client.dir/codegen
 .PHONY : codegen
 
 # The main recursive "preinstall" target.
@@ -77,73 +79,106 @@ preinstall:
 .PHONY : preinstall
 
 # The main recursive "clean" target.
-clean: CMakeFiles/echo_server.dir/clean
-clean: CMakeFiles/chat_client.dir/clean
+clean: CMakeFiles/chat_server.dir/clean
+clean: CMakeFiles/chat_client_mt.dir/clean
+clean: CMakeFiles/epoll_client.dir/clean
 .PHONY : clean
 
 #=============================================================================
-# Target rules for target CMakeFiles/echo_server.dir
+# Target rules for target CMakeFiles/chat_server.dir
 
 # All Build rule for target.
-CMakeFiles/echo_server.dir/all:
-	$(MAKE) $(MAKESILENT) -f CMakeFiles/echo_server.dir/build.make CMakeFiles/echo_server.dir/depend
-	$(MAKE) $(MAKESILENT) -f CMakeFiles/echo_server.dir/build.make CMakeFiles/echo_server.dir/build
-	@$(CMAKE_COMMAND) -E cmake_echo_color "--switch=$(COLOR)" --progress-dir=/home/gj-lee/Desktop/socket/v2/build/CMakeFiles --progress-num=3,4,5,6 "Built target echo_server"
-.PHONY : CMakeFiles/echo_server.dir/all
+CMakeFiles/chat_server.dir/all:
+	$(MAKE) $(MAKESILENT) -f CMakeFiles/chat_server.dir/build.make CMakeFiles/chat_server.dir/depend
+	$(MAKE) $(MAKESILENT) -f CMakeFiles/chat_server.dir/build.make CMakeFiles/chat_server.dir/build
+	@$(CMAKE_COMMAND) -E cmake_echo_color "--switch=$(COLOR)" --progress-dir=/home/gj-lee/Desktop/socket/v2/build/CMakeFiles --progress-num=3,4,5,6 "Built target chat_server"
+.PHONY : CMakeFiles/chat_server.dir/all
 
 # Build rule for subdir invocation for target.
-CMakeFiles/echo_server.dir/rule: cmake_check_build_system
+CMakeFiles/chat_server.dir/rule: cmake_check_build_system
 	$(CMAKE_COMMAND) -E cmake_progress_start /home/gj-lee/Desktop/socket/v2/build/CMakeFiles 4
-	$(MAKE) $(MAKESILENT) -f CMakeFiles/Makefile2 CMakeFiles/echo_server.dir/all
+	$(MAKE) $(MAKESILENT) -f CMakeFiles/Makefile2 CMakeFiles/chat_server.dir/all
 	$(CMAKE_COMMAND) -E cmake_progress_start /home/gj-lee/Desktop/socket/v2/build/CMakeFiles 0
-.PHONY : CMakeFiles/echo_server.dir/rule
+.PHONY : CMakeFiles/chat_server.dir/rule
 
 # Convenience name for target.
-echo_server: CMakeFiles/echo_server.dir/rule
-.PHONY : echo_server
+chat_server: CMakeFiles/chat_server.dir/rule
+.PHONY : chat_server
 
 # codegen rule for target.
-CMakeFiles/echo_server.dir/codegen:
-	$(MAKE) $(MAKESILENT) -f CMakeFiles/echo_server.dir/build.make CMakeFiles/echo_server.dir/codegen
-	@$(CMAKE_COMMAND) -E cmake_echo_color "--switch=$(COLOR)" --progress-dir=/home/gj-lee/Desktop/socket/v2/build/CMakeFiles --progress-num=3,4,5,6 "Finished codegen for target echo_server"
-.PHONY : CMakeFiles/echo_server.dir/codegen
+CMakeFiles/chat_server.dir/codegen:
+	$(MAKE) $(MAKESILENT) -f CMakeFiles/chat_server.dir/build.make CMakeFiles/chat_server.dir/codegen
+	@$(CMAKE_COMMAND) -E cmake_echo_color "--switch=$(COLOR)" --progress-dir=/home/gj-lee/Desktop/socket/v2/build/CMakeFiles --progress-num=3,4,5,6 "Finished codegen for target chat_server"
+.PHONY : CMakeFiles/chat_server.dir/codegen
 
 # clean rule for target.
-CMakeFiles/echo_server.dir/clean:
-	$(MAKE) $(MAKESILENT) -f CMakeFiles/echo_server.dir/build.make CMakeFiles/echo_server.dir/clean
-.PHONY : CMakeFiles/echo_server.dir/clean
+CMakeFiles/chat_server.dir/clean:
+	$(MAKE) $(MAKESILENT) -f CMakeFiles/chat_server.dir/build.make CMakeFiles/chat_server.dir/clean
+.PHONY : CMakeFiles/chat_server.dir/clean
 
 #=============================================================================
-# Target rules for target CMakeFiles/chat_client.dir
+# Target rules for target CMakeFiles/chat_client_mt.dir
 
 # All Build rule for target.
-CMakeFiles/chat_client.dir/all:
-	$(MAKE) $(MAKESILENT) -f CMakeFiles/chat_client.dir/build.make CMakeFiles/chat_client.dir/depend
-	$(MAKE) $(MAKESILENT) -f CMakeFiles/chat_client.dir/build.make CMakeFiles/chat_client.dir/build
-	@$(CMAKE_COMMAND) -E cmake_echo_color "--switch=$(COLOR)" --progress-dir=/home/gj-lee/Desktop/socket/v2/build/CMakeFiles --progress-num=1,2 "Built target chat_client"
-.PHONY : CMakeFiles/chat_client.dir/all
+CMakeFiles/chat_client_mt.dir/all:
+	$(MAKE) $(MAKESILENT) -f CMakeFiles/chat_client_mt.dir/build.make CMakeFiles/chat_client_mt.dir/depend
+	$(MAKE) $(MAKESILENT) -f CMakeFiles/chat_client_mt.dir/build.make CMakeFiles/chat_client_mt.dir/build
+	@$(CMAKE_COMMAND) -E cmake_echo_color "--switch=$(COLOR)" --progress-dir=/home/gj-lee/Desktop/socket/v2/build/CMakeFiles --progress-num=1,2 "Built target chat_client_mt"
+.PHONY : CMakeFiles/chat_client_mt.dir/all
 
 # Build rule for subdir invocation for target.
-CMakeFiles/chat_client.dir/rule: cmake_check_build_system
+CMakeFiles/chat_client_mt.dir/rule: cmake_check_build_system
 	$(CMAKE_COMMAND) -E cmake_progress_start /home/gj-lee/Desktop/socket/v2/build/CMakeFiles 2
-	$(MAKE) $(MAKESILENT) -f CMakeFiles/Makefile2 CMakeFiles/chat_client.dir/all
+	$(MAKE) $(MAKESILENT) -f CMakeFiles/Makefile2 CMakeFiles/chat_client_mt.dir/all
 	$(CMAKE_COMMAND) -E cmake_progress_start /home/gj-lee/Desktop/socket/v2/build/CMakeFiles 0
-.PHONY : CMakeFiles/chat_client.dir/rule
+.PHONY : CMakeFiles/chat_client_mt.dir/rule
 
 # Convenience name for target.
-chat_client: CMakeFiles/chat_client.dir/rule
-.PHONY : chat_client
+chat_client_mt: CMakeFiles/chat_client_mt.dir/rule
+.PHONY : chat_client_mt
 
 # codegen rule for target.
-CMakeFiles/chat_client.dir/codegen:
-	$(MAKE) $(MAKESILENT) -f CMakeFiles/chat_client.dir/build.make CMakeFiles/chat_client.dir/codegen
-	@$(CMAKE_COMMAND) -E cmake_echo_color "--switch=$(COLOR)" --progress-dir=/home/gj-lee/Desktop/socket/v2/build/CMakeFiles --progress-num=1,2 "Finished codegen for target chat_client"
-.PHONY : CMakeFiles/chat_client.dir/codegen
+CMakeFiles/chat_client_mt.dir/codegen:
+	$(MAKE) $(MAKESILENT) -f CMakeFiles/chat_client_mt.dir/build.make CMakeFiles/chat_client_mt.dir/codegen
+	@$(CMAKE_COMMAND) -E cmake_echo_color "--switch=$(COLOR)" --progress-dir=/home/gj-lee/Desktop/socket/v2/build/CMakeFiles --progress-num=1,2 "Finished codegen for target chat_client_mt"
+.PHONY : CMakeFiles/chat_client_mt.dir/codegen
 
 # clean rule for target.
-CMakeFiles/chat_client.dir/clean:
-	$(MAKE) $(MAKESILENT) -f CMakeFiles/chat_client.dir/build.make CMakeFiles/chat_client.dir/clean
-.PHONY : CMakeFiles/chat_client.dir/clean
+CMakeFiles/chat_client_mt.dir/clean:
+	$(MAKE) $(MAKESILENT) -f CMakeFiles/chat_client_mt.dir/build.make CMakeFiles/chat_client_mt.dir/clean
+.PHONY : CMakeFiles/chat_client_mt.dir/clean
+
+#=============================================================================
+# Target rules for target CMakeFiles/epoll_client.dir
+
+# All Build rule for target.
+CMakeFiles/epoll_client.dir/all:
+	$(MAKE) $(MAKESILENT) -f CMakeFiles/epoll_client.dir/build.make CMakeFiles/epoll_client.dir/depend
+	$(MAKE) $(MAKESILENT) -f CMakeFiles/epoll_client.dir/build.make CMakeFiles/epoll_client.dir/build
+	@$(CMAKE_COMMAND) -E cmake_echo_color "--switch=$(COLOR)" --progress-dir=/home/gj-lee/Desktop/socket/v2/build/CMakeFiles --progress-num=7,8,9 "Built target epoll_client"
+.PHONY : CMakeFiles/epoll_client.dir/all
+
+# Build rule for subdir invocation for target.
+CMakeFiles/epoll_client.dir/rule: cmake_check_build_system
+	$(CMAKE_COMMAND) -E cmake_progress_start /home/gj-lee/Desktop/socket/v2/build/CMakeFiles 3
+	$(MAKE) $(MAKESILENT) -f CMakeFiles/Makefile2 CMakeFiles/epoll_client.dir/all
+	$(CMAKE_COMMAND) -E cmake_progress_start /home/gj-lee/Desktop/socket/v2/build/CMakeFiles 0
+.PHONY : CMakeFiles/epoll_client.dir/rule
+
+# Convenience name for target.
+epoll_client: CMakeFiles/epoll_client.dir/rule
+.PHONY : epoll_client
+
+# codegen rule for target.
+CMakeFiles/epoll_client.dir/codegen:
+	$(MAKE) $(MAKESILENT) -f CMakeFiles/epoll_client.dir/build.make CMakeFiles/epoll_client.dir/codegen
+	@$(CMAKE_COMMAND) -E cmake_echo_color "--switch=$(COLOR)" --progress-dir=/home/gj-lee/Desktop/socket/v2/build/CMakeFiles --progress-num=7,8,9 "Finished codegen for target epoll_client"
+.PHONY : CMakeFiles/epoll_client.dir/codegen
+
+# clean rule for target.
+CMakeFiles/epoll_client.dir/clean:
+	$(MAKE) $(MAKESILENT) -f CMakeFiles/epoll_client.dir/build.make CMakeFiles/epoll_client.dir/clean
+.PHONY : CMakeFiles/epoll_client.dir/clean
 
 #=============================================================================
 # Special targets to cleanup operation of make.

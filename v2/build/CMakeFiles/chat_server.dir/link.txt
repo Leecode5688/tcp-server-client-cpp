@@ -1,0 +1,1 @@
+/usr/bin/c++  -Wall -Wextra -pedantic -Wl,--dependency-file=CMakeFiles/chat_server.dir/link.d CMakeFiles/chat_server.dir/main.cpp.o CMakeFiles/chat_server.dir/threadpool.cpp.o CMakeFiles/chat_server.dir/webserver.cpp.o -o chat_server

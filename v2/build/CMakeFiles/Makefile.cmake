@@ -54,6 +54,7 @@ set(CMAKE_MAKEFILE_PRODUCTS
 
 # Dependency information for all targets:
 set(CMAKE_DEPEND_INFO_FILES
-  "CMakeFiles/echo_server.dir/DependInfo.cmake"
-  "CMakeFiles/chat_client.dir/DependInfo.cmake"
+  "CMakeFiles/chat_server.dir/DependInfo.cmake"
+  "CMakeFiles/chat_client_mt.dir/DependInfo.cmake"
+  "CMakeFiles/epoll_client.dir/DependInfo.cmake"
   )

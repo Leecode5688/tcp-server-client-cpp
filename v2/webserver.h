@@ -2,9 +2,11 @@
 #include "connection.h"
 #include "threadpool.h"
 #include <unordered_map>
+#include <unordered_set>
 #include <memory>
 #include <atomic>
 #include <mutex>
+#include <queue>
 
 class WebServer{
 private:
@@ -35,9 +37,11 @@ private:
     std::unique_ptr<ThreadPool> threadpool_;
     //a map protected by mutex that stores fd to their corresponding connection state
     std::unordered_map<int, ConnPtr> connections_;
+    std::unordered_set<std::string> usernames_;
     std::mutex conn_map_mtx_;
 
-    std::queue<std::string> broadcast_queue_;
+    // std::queue<std::string> broadcast_queue_;
+    std::queue<std::pair<std::string, int>> broadcast_queue_;
     std::mutex broadcast_mtx_;
 
 public:
@@ -46,5 +50,6 @@ public:
 
     void run();
     void stop();
-    void queue_broadcast_message(const std::string& msg);
+    // void queue_broadcast_message(const std::string& msg);
+    void queue_broadcast_message(const std::string& msg, int sender_fd);
 };

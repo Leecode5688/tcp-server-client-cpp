@@ -15,7 +15,7 @@ private:
     void worker_loop();
     //a vector to hold the actual worker threads
     std::vector<std::thread> workers_;
-    //a queue that holds connections and their associated messages to be processed
+    //a queue that holds connection pointer and their associated messages to be processed
     std::queue<std::pair<ConnPtr, std::string>> task_queue_;
     //use mutex and condition variable to add/remove tasks safely
     std::mutex queue_mtx_;
