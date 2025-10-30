@@ -39,7 +39,10 @@ void WebServer::queue_broadcast_message(const std::string& msg, int sender_fd)
     broadcast_queue_.push({msg, sender_fd});
 }
 
-void WebServer::handle_broadcasts(){
+//drains all the pending messages from the broadcast queue into 
+//a message vector, then sends each message to all active connections
+void WebServer::handle_broadcasts()
+{
     std::vector<std::pair<std::string, int>> messages_to_send;
     {
         std::lock_guard<std::mutex> lk(broadcast_mtx_);
@@ -52,24 +55,38 @@ void WebServer::handle_broadcasts(){
 
     if(messages_to_send.empty()) return;
 
-    std::lock_guard<std::mutex> lk(conn_map_mtx_);
-
-    for(const auto& msg_pair : messages_to_send)
+    std::vector<ConnPtr> active_conns;
     {
-        const std::string& msg = msg_pair.first;
-        int sender_fd = msg_pair.second;
-
+        std::lock_guard<std::mutex> lk(conn_map_mtx_);
+        active_conns.reserve(connections_.size());
         for(auto& conn_pair : connections_)
         {
-            if(conn_pair.first == sender_fd) continue;
+            active_conns.push_back(conn_pair.second);
+        }
+    }
 
-            ConnPtr conn = conn_pair.second;
-            if(conn && !conn->closed.load() && conn->state == ConnState::ACTIVE)
+    //iterate over the local copy
+    for(const auto& conn : active_conns)
+    {
+        if(!conn || conn->closed.load() || conn->state != ConnState::ACTIVE)
+        {
+            continue;
+        }
+
+        std::string buffer_for_this_client;
+        for(const auto& msg_pair : messages_to_send)
+        {
+            if(conn->fd != msg_pair.second)
             {
-                std::lock_guard<std::mutex> conn_lk(conn->mtx);
-                conn->out_buf += msg;
-                mod_fd_epoll(conn->fd, EPOLLIN | EPOLLOUT);
+                buffer_for_this_client += msg_pair.first;
             }
+        }
+
+        if(!buffer_for_this_client.empty())
+        {
+            std::lock_guard<std::mutex> conn_lk(conn->mtx);
+            conn->out_buf += buffer_for_this_client;
+            mod_fd_epoll(conn->fd, EPOLLIN | EPOLLOUT);
         }
     }
 }

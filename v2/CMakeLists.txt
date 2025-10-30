@@ -12,10 +12,7 @@ set(CMAKE_CXX_FLAGS "${CMAKE_CXX_FLAGS} -Wall -Wextra -pedantic")
 # Add source files
 set(SERVER_SOURCES
     main.cpp
-    connection.h
-    threadpool.h
     threadpool.cpp
-    webserver.h
     webserver.cpp
     )
 
@@ -35,5 +32,4 @@ target_link_libraries(chat_client_mt PRIVATE Threads::Threads)
 add_executable(epoll_client
     main_epoll_client.cpp
     client.cpp
-    client.h
 )
