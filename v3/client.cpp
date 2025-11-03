@@ -179,13 +179,17 @@ void Client::run()
 
         for(int i = 0; i < nfds; ++i)
         {   
-            if(events[i].events & (EPOLLERR | EPOLLHUP))
+            if(!running_) break;
+
+            // if(events[i].events & (EPOLLERR | EPOLLHUP))
+            if(events[i].events & (EPOLLERR | EPOLLHUP | EPOLLRDHUP))
             {
                 if(events[i].data.fd == sock_fd_)
                 {
                     std::cout << "\r\033[KServer connection lost." << std::endl;
                 }
-                running_ = false;
+                stop();
+
                 break;
         
             }
@@ -196,12 +200,13 @@ void Client::run()
                 if(s != sizeof(fdsi))
                 {
                     perror("read");
-                    running_ = false;
+                    // running_ = false;
+                    stop();
                     break;
                 }
 
                 std::cout<<"\nSignal received, exiting...\n";
-                running_ = false;
+                stop();
             }
             else if(events[i].data.fd == sock_fd_)
             {
@@ -247,7 +252,7 @@ void Client::setup_epoll()
     if(epoll_fd_ == -1)
     {
         perror("epoll_create1");
-        running_ = false;
+        stop();
         exit(1);
     }
     epoll_event ev;
@@ -257,34 +262,44 @@ void Client::setup_epoll()
     if(epoll_ctl(epoll_fd_, EPOLL_CTL_ADD, sig_fd_, &ev) == -1)
     {
         perror("epoll_ctl (sig_fd)");
-        running_ = false;
+        stop();
         exit(1);
     }
+
+    ev.events = EPOLLIN | EPOLLET | EPOLLRDHUP;
+
     ev.data.fd = sock_fd_;
     if(epoll_ctl(epoll_fd_, EPOLL_CTL_ADD, sock_fd_, &ev) == -1)
     {
         perror("epoll_ctl (sock_fd)");
-        running_ = false;
+        // running_ = false;
+        stop();
         return;
     }
     
-    // epoll_ctl(epoll_fd_, EPOLL_CTL_ADD, sock_fd_, &ev);
+    ev.events = EPOLLIN | EPOLLET;
+
     ev.data.fd = STDIN_FILENO;
     if(epoll_ctl(epoll_fd_, EPOLL_CTL_ADD, STDIN_FILENO, &ev) == -1)
     {
         perror("epoll_ctl (STDIN)");
-        running_ = false;
+        stop();
         return;
     }
-    // epoll_ctl(epoll_fd_, EPOLL_CTL_ADD, STDIN_FILENO, &ev);
+}
+
+void Client::stop()
+{
+    running_ = false;
 }
 
 void Client::handle_server_message()
 {
+    if(!running_) return;
+    
     char buffer[BUFFER_SIZE];
     while(running_)
     {
-        // ssize_t n = recv(sock_fd_, buffer, sizeof(buffer) - 1, 0);
         ssize_t n = recv(sock_fd_, buffer, sizeof(buffer), 0);
         if(n > 0)
         {
@@ -324,19 +339,21 @@ void Client::handle_server_message()
             else
             {
                 std::cout << "\r\033[KServer connection lost." << std::endl;
-                running_ = false;
+                stop();
                 break;
             }
         }
     }
     if(running_)
     {
-        std::cout<<prompt_<<current_line_<<std::flush;
+        std::cout<<"\r\033[K"<<prompt_<<current_line_<<std::flush;
     }
 }
 
 void Client::handle_keyboard_input()
 {
+    if(!running_) return;
+
     char c;
     while(read(STDIN_FILENO, &c, 1) > 0)
     {
@@ -344,7 +361,7 @@ void Client::handle_keyboard_input()
         {
             if(current_line_ == "exit")
             {
-                running_ = false;
+                stop();
                 return;
             }
 
@@ -359,14 +376,14 @@ void Client::handle_keyboard_input()
                 if(send(sock_fd_, &net_len, sizeof(uint32_t), MSG_NOSIGNAL) < 0)
                 {
                     perror("Send failed (header)!!");
-                    running_ = false;
+                    stop();
                     return;
                 }
 
                 if(send(sock_fd_, current_line_.c_str(), len, 0) < 0)
                 {
                     perror("Send failed (payload)!!");
-                    running_ = false;
+                    stop();
                     return;
                 }           
                 current_line_.clear();

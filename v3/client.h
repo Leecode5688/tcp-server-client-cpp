@@ -7,6 +7,7 @@ class Client {
 private:
     void setup_signalfd();
     void setup_epoll();
+    void stop();
     void handle_server_message();
     void handle_keyboard_input();
 
