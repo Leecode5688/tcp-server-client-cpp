@@ -20,3 +20,7 @@ target_link_libraries(chat_server PRIVATE Threads::Threads)
 add_executable(epoll_client
                main_epoll_client.cpp
                client.cpp)   
+
+#------------ FOR LOAD TESTER --------------
+add_executable(load_bot load_bot.cpp)
+target_link_libraries(load_bot PRIVATE Threads::Threads)
