@@ -17,6 +17,9 @@ struct Connection {
     std::string out_buf;
     std::mutex mtx;
     std::atomic<bool> closed{false};
+
+    bool is_write_armed{false};
+
     explicit Connection(int fd_) : fd(fd_) {}
 };
 

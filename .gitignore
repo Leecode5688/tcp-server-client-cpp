@@ -12,3 +12,6 @@ build/
 
 # MacOS system files
 .DS_Store
+
+#Profiling data
+perf.data*

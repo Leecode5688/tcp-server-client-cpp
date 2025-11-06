@@ -94,7 +94,12 @@ void WebServer::handle_broadcasts()
         {
             std::lock_guard<std::mutex> conn_lk(conn->mtx);
             conn->out_buf += buffer_for_this_client;
-            mod_fd_epoll(conn->fd, EPOLLIN | EPOLLOUT);
+
+            if(!conn->is_write_armed)
+            {
+                mod_fd_epoll(conn->fd, EPOLLIN | EPOLLOUT);
+                conn->is_write_armed = true;
+            }
         }
     }
 }
@@ -346,7 +351,7 @@ void WebServer::handle_write(ConnPtr conn)
         }
         else if(n == -1 && (errno == EAGAIN || errno == EWOULDBLOCK))
         {
-            mod_fd_epoll(conn->fd, EPOLLIN | EPOLLOUT);
+            // mod_fd_epoll(conn->fd, EPOLLIN | EPOLLOUT);
             return;
         }
         else
@@ -356,6 +361,7 @@ void WebServer::handle_write(ConnPtr conn)
         }
     }
     mod_fd_epoll(conn->fd, EPOLLIN);
+    conn->is_write_armed = false;
 }
 
 void WebServer::close_conn(ConnPtr conn)
@@ -365,7 +371,6 @@ void WebServer::close_conn(ConnPtr conn)
 
     if(!conn->username.empty())
     {
-        // leave_msg = "[Server]: " + conn->username + " has left the chatroom.\n";
         leave_msg = "[Server]: "+ conn->username + " has left the chatroom.";
         std::lock_guard<std::mutex> map_lk(conn_map_mtx_);
         usernames_.erase(conn->username);
@@ -395,9 +400,11 @@ void WebServer::handle_pending_writes()
     {
         auto& conn = c.second;
         std::lock_guard<std::mutex> lk2(conn->mtx);
-        if(!conn->out_buf.empty())
+        
+        if(!conn->out_buf.empty() && !conn->is_write_armed)
         {
             mod_fd_epoll(conn->fd, EPOLLIN | EPOLLOUT);
+            conn->is_write_armed = true;
         }
     }
 }
