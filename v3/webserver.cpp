@@ -42,66 +42,17 @@ std::string WebServer::format_message(const std::string& msg)
     return packet;
 }
 
-void WebServer::queue_broadcast_message(const std::string& msg, int sender_fd)
+std::vector<ConnPtr> WebServer::get_active_connections()
 {
-    std::string packet = format_message(msg);
-    std::lock_guard<std::mutex> lk(broadcast_mtx_);
-    broadcast_queue_.push({packet, sender_fd});
-}
-
-void WebServer::handle_broadcasts()
-{
-    std::vector<std::pair<std::string, int>> messages_to_send;
-    {
-        std::lock_guard<std::mutex> lk(broadcast_mtx_);
-        while(!broadcast_queue_.empty())
-        {
-            messages_to_send.push_back(std::move(broadcast_queue_.front()));
-            broadcast_queue_.pop();
-        }
-    }
-
-    if(messages_to_send.empty()) return;
-
     std::vector<ConnPtr> active_conns;
+    // std::lock_guard<std::mutex> lk(conn_map_mtx_);
+    std::shared_lock<std::shared_mutex> lk(conn_map_mtx_);
+    active_conns.reserve(connections_.size());
+    for(const auto& conn_pair : connections_)
     {
-        std::lock_guard<std::mutex> lk(conn_map_mtx_);
-        active_conns.reserve(connections_.size());
-        for(auto& conn_pair : connections_)
-        {
-            active_conns.push_back(conn_pair.second);
-        }
+        active_conns.push_back(conn_pair.second);
     }
-
-    //iterate over the local copy
-    for(const auto& conn : active_conns)
-    {
-        if(!conn || conn->closed.load() || conn->state != ConnState::ACTIVE)
-        {
-            continue;
-        }
-
-        std::string buffer_for_this_client;
-        for(const auto& msg_pair : messages_to_send)
-        {
-            if(conn->fd != msg_pair.second)
-            {
-                buffer_for_this_client += msg_pair.first;
-            }
-        }
-
-        if(!buffer_for_this_client.empty())
-        {
-            std::lock_guard<std::mutex> conn_lk(conn->mtx);
-            conn->out_buf += buffer_for_this_client;
-
-            if(!conn->is_write_armed)
-            {
-                mod_fd_epoll(conn->fd, EPOLLIN | EPOLLOUT);
-                conn->is_write_armed = true;
-            }
-        }
-    }
+    return active_conns;
 }
 
 void WebServer::setup_signalfd()
@@ -169,6 +120,7 @@ void WebServer::setup_epoll()
     }
     add_fd_to_epoll(listen_fd_, EPOLLIN);
     add_fd_to_epoll(sig_fd_, EPOLLIN);
+    add_fd_to_epoll(notify_fd_, EPOLLIN);
 }
 
 void WebServer::setup_eventfd()
@@ -228,7 +180,8 @@ void WebServer::accept_loop()
         set_nonblocking(client_fd);
         ConnPtr conn = std::make_shared<Connection>(client_fd);
         {
-            std::lock_guard<std::mutex> lk(conn_map_mtx_);
+            // std::lock_guard<std::mutex> lk(conn_map_mtx_);
+            std::lock_guard<std::shared_mutex> lk(conn_map_mtx_);
             connections_[client_fd] = conn;
         }
 
@@ -285,7 +238,7 @@ void WebServer::handle_read(ConnPtr conn)
                     std::string enteredName = line;
                     bool validName = false;
                     {
-                        std::lock_guard<std::mutex> map_lk(conn_map_mtx_);
+                        std::unique_lock<std::shared_mutex> map_lk(conn_map_mtx_);
                         if(!usernames_.count(enteredName) && !enteredName.empty())
                         {
                             usernames_.insert(enteredName);
@@ -305,10 +258,12 @@ void WebServer::handle_read(ConnPtr conn)
                         }
 
                         std::string joinMessage = "[Server]: " + conn->username + " has joined the chatroom!\n";
-                        queue_broadcast_message(joinMessage, -1);
+                        // queue_broadcast_message(joinMessage, -1);
 
-                        uint64_t one = 1;
-                        write(notify_fd_, &one, sizeof(one));
+                        threadpool_->push_task(nullptr, joinMessage);
+
+                        // uint64_t one = 1;
+                        // write(notify_fd_, &one, sizeof(one));
                     }
                     else
                     {
@@ -341,7 +296,8 @@ void WebServer::handle_read(ConnPtr conn)
 
 void WebServer::handle_write(ConnPtr conn)
 {
-    std::lock_guard<std::mutex> lk(conn->mtx);
+    // std::lock_guard<std::mutex> lk(conn->mtx);
+    
     while(!conn->out_buf.empty())
     {
         ssize_t n = send(conn->fd, conn->out_buf.data(), conn->out_buf.size(), MSG_NOSIGNAL);
@@ -351,7 +307,6 @@ void WebServer::handle_write(ConnPtr conn)
         }
         else if(n == -1 && (errno == EAGAIN || errno == EWOULDBLOCK))
         {
-            // mod_fd_epoll(conn->fd, EPOLLIN | EPOLLOUT);
             return;
         }
         else
@@ -372,21 +327,21 @@ void WebServer::close_conn(ConnPtr conn)
     if(!conn->username.empty())
     {
         leave_msg = "[Server]: "+ conn->username + " has left the chatroom.";
-        std::lock_guard<std::mutex> map_lk(conn_map_mtx_);
+        // std::lock_guard<std::mutex> map_lk(conn_map_mtx_);
+        std::unique_lock<std::shared_mutex> lk(conn_map_mtx_);
         usernames_.erase(conn->username);
     }
 
     if(!leave_msg.empty())
     {
-        queue_broadcast_message(leave_msg, -1);
-        uint64_t one = 1;
-        write(notify_fd_, &one, sizeof(one));
+        threadpool_->push_task(nullptr, leave_msg);
     }
 
     epoll_ctl(epoll_fd_, EPOLL_CTL_DEL, conn->fd, nullptr);
     close(conn->fd);
     {
-        std::lock_guard<std::mutex> lk(conn_map_mtx_);
+        // std::lock_guard<std::mutex> lk(conn_map_mtx_);
+        std::unique_lock<std::shared_mutex> lk(conn_map_mtx_);
         connections_.erase(conn->fd);
     }
 
@@ -395,17 +350,27 @@ void WebServer::close_conn(ConnPtr conn)
 
 void WebServer::handle_pending_writes()
 {
-    std::lock_guard<std::mutex> lk(conn_map_mtx_);
+    // std::lock_guard<std::mutex> lk(conn_map_mtx_);
+    std::shared_lock<std::shared_mutex> lk(conn_map_mtx_);
     for(auto& c : connections_)
     {
         auto& conn = c.second;
-        std::lock_guard<std::mutex> lk2(conn->mtx);
+
+        if(!conn || conn->closed.load()) continue;
         
+        std::lock_guard<std::mutex> conn_lk(conn->mtx);
+        if(!conn->incoming_buf.empty())
+        {
+            conn->out_buf.append(conn->incoming_buf);
+            conn->incoming_buf.clear();
+        }
+
         if(!conn->out_buf.empty() && !conn->is_write_armed)
         {
             mod_fd_epoll(conn->fd, EPOLLIN | EPOLLOUT);
             conn->is_write_armed = true;
         }
+
     }
 }
 
@@ -446,13 +411,14 @@ void WebServer::run()
             {
                 uint64_t cnt;
                 read(notify_fd_, &cnt, sizeof(cnt));
-                handle_broadcasts();
+                handle_pending_writes();
             }
             else
             {
                 ConnPtr conn;
                 {
-                    std::lock_guard<std::mutex> lk(conn_map_mtx_);
+                    // std::lock_guard<std::mutex> lk(conn_map_mtx_);
+                    std::shared_lock<std::shared_mutex> lk(conn_map_mtx_);
                     auto it = connections_.find(fd);
                     if(it != connections_.end())
                     {
@@ -492,7 +458,8 @@ void WebServer::stop()
     }
 
     {
-        std::lock_guard<std::mutex> lk(conn_map_mtx_);
+        // std::lock_guard<std::mutex> lk(conn_map_mtx_);
+        std::unique_lock<std::shared_mutex> lk(conn_map_mtx_);
         for(auto& c : connections_)
         {
             ::close(c.first);

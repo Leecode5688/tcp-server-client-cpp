@@ -1,6 +1,8 @@
 #include "threadpool.h"
 #include "webserver.h"
 #include <unistd.h>
+#include <sys/epoll.h>
+#include <vector>
 #include <sys/eventfd.h>
 #include <iostream>
 
@@ -54,17 +56,46 @@ void ThreadPool::worker_loop()
                 return !task_queue_.empty() || !running_;
             });
             if(!running_ && task_queue_.empty()) return;
+
             task = std::move(task_queue_.front());
             task_queue_.pop();
         }
 
-        ConnPtr conn = task.first;
-        std::string& message = task.second;
-        
-        if(!conn || conn->closed.load() || conn->username.empty()) continue;
+        ConnPtr sender_conn = task.first;
+        std::string message = task.second;
 
-        std::string broadcast_msg = "[" + conn->username + "]: " + message;
-        server_.queue_broadcast_message(broadcast_msg, conn->fd);
+        std::string broadcast_msg;
+        if(sender_conn)
+        {
+            if(sender_conn->closed.load() || sender_conn->username.empty()) continue;
+            broadcast_msg = "[" + sender_conn->username + "]: " + message;
+        }
+        else 
+        {
+            //joining or leaving message from the server
+            broadcast_msg = message;
+        }
+        //format the packet
+        std::string packet = server_.format_message(broadcast_msg);
+        std::vector<ConnPtr> active_conns = server_.get_active_connections();
+
+        for(const auto& conn : active_conns)
+        {
+            if(!conn || conn->closed.load() || conn->state != ConnState::ACTIVE)
+            {
+                continue;
+            }
+            if(sender_conn && conn->fd == sender_conn->fd)
+            {
+                continue;
+            }
+
+            {
+                std::lock_guard<std::mutex> conn_lk(conn->mtx);
+                conn->incoming_buf += packet;
+            }
+        }   
+
         uint64_t one = 1;
         write(notify_fd_, &one, sizeof(one));
     }
