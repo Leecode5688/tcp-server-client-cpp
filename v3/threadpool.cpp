@@ -94,6 +94,8 @@ void ThreadPool::worker_loop()
                 std::lock_guard<std::mutex> conn_lk(conn->mtx);
                 conn->incoming_buf += packet;
             }
+
+            server_.mark_fd_for_writing(conn->fd);
         }   
 
         uint64_t one = 1;

@@ -234,11 +234,11 @@ void WebServer::handle_read(ConnPtr conn)
 
                 if(conn->state == ConnState::AWAITING_USERNAME)
                 {
-                    // std::string enteredName = line.substr(0, line.size()-1);
                     std::string enteredName = line;
                     bool validName = false;
                     {
-                        std::unique_lock<std::shared_mutex> map_lk(conn_map_mtx_);
+                        // std::unique_lock<std::shared_mutex> map_lk(conn_map_mtx_);
+                        std::unique_lock<std::shared_mutex> user_name_lk(usernames_mtx_);
                         if(!usernames_.count(enteredName) && !enteredName.empty())
                         {
                             usernames_.insert(enteredName);
@@ -248,6 +248,10 @@ void WebServer::handle_read(ConnPtr conn)
 
                     if(validName)
                     {
+                        std::unique_lock<std::shared_mutex> user_name_lk(usernames_mtx_);
+                        {
+                            usernames_.insert(enteredName);
+                        }
                         conn->username = enteredName;
                         conn->state = ConnState::ACTIVE;
                         std::string validMessage = "[Server]: Username accepted! You have entered the chat!\n";
@@ -327,9 +331,9 @@ void WebServer::close_conn(ConnPtr conn)
     if(!conn->username.empty())
     {
         leave_msg = "[Server]: "+ conn->username + " has left the chatroom.";
-        // std::lock_guard<std::mutex> map_lk(conn_map_mtx_);
-        std::unique_lock<std::shared_mutex> lk(conn_map_mtx_);
+        std::unique_lock<std::shared_mutex> user_name_lk(usernames_mtx_);
         usernames_.erase(conn->username);
+        
     }
 
     if(!leave_msg.empty())
@@ -348,13 +352,38 @@ void WebServer::close_conn(ConnPtr conn)
     std::cout<<"Closed fd = "<<conn->fd<<"\n";
 }
 
+void WebServer::mark_fd_for_writing(int fd)
+{
+    std::lock_guard<std::mutex> lk(ready_to_write_mtx_);
+    ready_to_write_fd_queue_.push(fd);
+}
+
 void WebServer::handle_pending_writes()
 {
-    // std::lock_guard<std::mutex> lk(conn_map_mtx_);
-    std::shared_lock<std::shared_mutex> lk(conn_map_mtx_);
-    for(auto& c : connections_)
+
+    std::queue<int> fds_to_process;
     {
-        auto& conn = c.second;
+        std::lock_guard<std::mutex> lk(ready_to_write_mtx_);
+        fds_to_process.swap(ready_to_write_fd_queue_);
+    }
+
+    std::unordered_set<int> unique_fds;
+    while(!fds_to_process.empty())
+    {
+        unique_fds.insert(fds_to_process.front());
+        fds_to_process.pop();
+    }
+
+    std::shared_lock<std::shared_mutex> lk(conn_map_mtx_);
+
+    // for(auto& c : connections_)
+    for(int fd : unique_fds)
+    {
+        auto it = connections_.find(fd);
+        if(it == connections_.end()) continue;
+        ConnPtr conn = it->second;
+        
+        // auto& conn = c.second;
 
         if(!conn || conn->closed.load()) continue;
         
