@@ -9,6 +9,8 @@
 #include <mutex>
 #include <queue>
 
+#define WRITE_BUDGET_PER_LOOP 100
+
 class WebServer{
 private:
     void setup_signalfd();
@@ -24,6 +26,10 @@ private:
     void handle_write(ConnPtr conn);
     void close_conn(ConnPtr conn);
     void handle_pending_writes();
+
+    //defines the work that workers will do
+    void handle_login_task(ConnPtr conn, std::string username);
+    void handle_broadcast_task(ConnPtr sender_conn, std::string message);
 
     int port_;
     int n_workers_;
@@ -50,7 +56,8 @@ public:
     void mod_fd_epoll(int fd, uint32_t events);
     std::vector<ConnPtr> get_active_connections();
 
-    void mark_fd_for_writing(int fd);
+    // void mark_fd_for_writing(int fd);
+    void mark_fd_for_writing(const ConnPtr& conn);
 
     void run();
     void stop();

@@ -15,6 +15,7 @@
 #define BACKLOG 128
 #define BUFFER_SIZE 4096
 #define MAX_EVENTS 128
+#define MAX_PAYLOAD_SIZE (1024 * 4)
 
 WebServer::WebServer(int port, int n_workers) : 
     port_(port), n_workers_(n_workers), running_(true)
@@ -23,7 +24,9 @@ WebServer::WebServer(int port, int n_workers) :
     setup_server_socket();
     setup_epoll();
     setup_eventfd();
-    threadpool_ = std::make_unique<ThreadPool>(n_workers_, notify_fd_, *this);
+
+    // threadpool_ = std::make_unique<ThreadPool>(n_workers_, notify_fd_, *this);
+    threadpool_ = std::make_unique<ThreadPool>(n_workers, notify_fd_);
 }
 
 WebServer::~WebServer(){
@@ -193,13 +196,109 @@ void WebServer::accept_loop()
             <<" fd = "<<client_fd<<"\n";
 
         std::string welcomeMessage = format_message("[Server]: Welcome! Please enter your username: ");
-        send(client_fd, welcomeMessage.c_str(), welcomeMessage.size(), 0);
+        // send(client_fd, welcomeMessage.c_str(), welcomeMessage.size(), 0);
+        
+        auto welcome_pkt = std::make_shared<std::string>(format_message(welcomeMessage));
+        {
+            std::lock_guard<std::mutex> conn_lk(conn->mtx);
+            conn->incoming_message_queue.push(welcome_pkt);
+        }
+        
+        mark_fd_for_writing(conn);
+        uint64_t one = 1;
+        write(notify_fd_, &one, sizeof(one));
     }
 }
 
+void WebServer::handle_login_task(ConnPtr conn, std::string username)
+{
+    bool validName = false;
+    {
+        std::unique_lock<std::shared_mutex> user_name_lk(usernames_mtx_);
+        if(!usernames_.count(username) && !username.empty() && username.size() < 50)
+        {
+            usernames_.insert(username);
+            validName = true;
+        }
+    }
+
+    std::string response_msg;
+    bool needs_broadcast = false;
+
+    if(validName)
+    {
+        conn->username = username;
+        conn->state = ConnState::ACTIVE;
+        response_msg = "[Server]: Username accepted! You have entered the chat!\n";
+        needs_broadcast = true;
+    }
+    else
+    {
+        response_msg = "[Server]: Username is invalid or already used. Please try another one: ";    
+    }
+
+    //queue the packet for this client
+    auto pkt_ptr = std::make_shared<std::string>(format_message(response_msg));
+    {
+        std::lock_guard<std::mutex> conn_lk(conn->mtx);
+        conn->incoming_message_queue.push(pkt_ptr);
+    }
+    mark_fd_for_writing(conn);
+
+    if(needs_broadcast)
+    {
+        std::string joinMessage = "[Server]: " + conn->username + " has joined the chatroom!\n";    
+        threadpool_->push_task([this, joinMessage]{
+            this->handle_broadcast_task(nullptr, joinMessage);
+        });
+    }
+
+    uint64_t one = 1;
+    write(notify_fd_, &one, sizeof(one));
+}
+
+void WebServer::handle_broadcast_task(ConnPtr sender_conn, std::string message)
+{
+    std::string broadcast_msg;
+    if(sender_conn)
+    {
+        broadcast_msg = "[" + sender_conn->username + "]: " + message;    
+    }
+    else
+    {
+        broadcast_msg = message;
+    }
+
+    auto packet_ptr = std::make_shared<std::string>(format_message(broadcast_msg));
+
+    std::vector<ConnPtr> active_conns = get_active_connections();
+
+    for(const auto& conn : active_conns)
+    {
+        if(!conn || conn->closed.load() || conn->state != ConnState::ACTIVE)
+        {
+            continue;
+        }
+        if(sender_conn && conn->fd == sender_conn->fd)
+        {
+            continue;
+        }
+
+        {
+            std::lock_guard<std::mutex> conn_lk(conn->mtx);
+            conn->incoming_message_queue.push(packet_ptr);
+        }
+        mark_fd_for_writing(conn);
+    }
+
+    uint64_t one = 1;
+    write(notify_fd_, &one, sizeof(one));
+}
+
+
 void WebServer::handle_read(ConnPtr conn)
 {
-    char buffer[BUFFER_SIZE];
+    char buffer[BUFFER_SIZE] = {0};
     while(true)
     {
         ssize_t n = recv(conn->fd, buffer, sizeof(buffer), 0);
@@ -221,6 +320,13 @@ void WebServer::handle_read(ConnPtr conn)
                 uint32_t net_len;
                 memcpy(&net_len, conn->in_buf.data(), sizeof(uint32_t));
                 uint32_t payload_len = ntohl(net_len);
+                
+                if(payload_len > MAX_PAYLOAD_SIZE)
+                {
+                    std::cout<<"Client "<<conn->fd<<" sent invalid payload size: "<<payload_len<<std::endl;
+                    close_conn(conn);
+                    return;
+                }
 
                 //Do we have ful header + payyload?
                 if(conn->in_buf.size() < (sizeof(uint32_t) + payload_len))
@@ -234,52 +340,16 @@ void WebServer::handle_read(ConnPtr conn)
 
                 if(conn->state == ConnState::AWAITING_USERNAME)
                 {
-                    std::string enteredName = line;
-                    bool validName = false;
-                    {
-                        // std::unique_lock<std::shared_mutex> map_lk(conn_map_mtx_);
-                        std::unique_lock<std::shared_mutex> user_name_lk(usernames_mtx_);
-                        if(!usernames_.count(enteredName) && !enteredName.empty())
-                        {
-                            usernames_.insert(enteredName);
-                            validName = true;
-                        }
-                    }
-
-                    if(validName)
-                    {
-                        std::unique_lock<std::shared_mutex> user_name_lk(usernames_mtx_);
-                        {
-                            usernames_.insert(enteredName);
-                        }
-                        conn->username = enteredName;
-                        conn->state = ConnState::ACTIVE;
-                        std::string validMessage = "[Server]: Username accepted! You have entered the chat!\n";
-                        // send as length-prefixed packet
-                        {
-                            std::string pkt = format_message(validMessage);
-                            send(conn->fd, pkt.data(), pkt.size(), MSG_NOSIGNAL);
-                        }
-
-                        std::string joinMessage = "[Server]: " + conn->username + " has joined the chatroom!\n";
-                        // queue_broadcast_message(joinMessage, -1);
-
-                        threadpool_->push_task(nullptr, joinMessage);
-
-                        // uint64_t one = 1;
-                        // write(notify_fd_, &one, sizeof(one));
-                    }
-                    else
-                    {
-                        std::string errorMessage = "[Server]: Username is invalid or already used. Please try another one.\n";
-                        std::string pkt = format_message(errorMessage);
-                        send(conn->fd, pkt.data(), pkt.size(), MSG_NOSIGNAL);
-                    }
+                    threadpool_->push_task([this, conn, line]{
+                        this->handle_login_task(conn, line);
+                    });
                 }
                 else if(conn->state == ConnState::ACTIVE)
                 {
-                    // threadpool_->push_task(conn, line + '\n');
-                    threadpool_->push_task(conn, line);
+                    // threadpool_->push_task(conn, line);
+                    threadpool_->push_task([this, conn, line] {
+                        this->handle_broadcast_task(conn, line);
+                    });
                 }
             }
         }
@@ -300,7 +370,7 @@ void WebServer::handle_read(ConnPtr conn)
 
 void WebServer::handle_write(ConnPtr conn)
 {
-    // std::lock_guard<std::mutex> lk(conn->mtx);
+    std::lock_guard<std::mutex> conn_lk(conn->mtx);
     
     while(!conn->out_buf.empty())
     {
@@ -321,6 +391,18 @@ void WebServer::handle_write(ConnPtr conn)
     }
     mod_fd_epoll(conn->fd, EPOLLIN);
     conn->is_write_armed = false;
+
+
+    //check if more works are queued when we were sending
+    if(!conn->incoming_message_queue.empty())
+    {
+        if(!conn->needs_processing)
+        {
+            conn->needs_processing = true;
+            std::lock_guard<std::mutex> lk(ready_to_write_mtx_);
+            ready_to_write_fd_queue_.push(conn->fd);
+        }
+    }
 }
 
 void WebServer::close_conn(ConnPtr conn)
@@ -338,7 +420,10 @@ void WebServer::close_conn(ConnPtr conn)
 
     if(!leave_msg.empty())
     {
-        threadpool_->push_task(nullptr, leave_msg);
+        // threadpool_->push_task(nullptr, leave_msg);
+        threadpool_->push_task([this, leave_msg] {
+            this->handle_broadcast_task(nullptr, leave_msg);
+        });
     }
 
     epoll_ctl(epoll_fd_, EPOLL_CTL_DEL, conn->fd, nullptr);
@@ -352,56 +437,66 @@ void WebServer::close_conn(ConnPtr conn)
     std::cout<<"Closed fd = "<<conn->fd<<"\n";
 }
 
-void WebServer::mark_fd_for_writing(int fd)
+// void WebServer::mark_fd_for_writing(int fd)
+void WebServer::mark_fd_for_writing(const ConnPtr& conn)
 {
-    std::lock_guard<std::mutex> lk(ready_to_write_mtx_);
-    ready_to_write_fd_queue_.push(fd);
+    // std::lock_guard<std::mutex> lk(ready_to_write_mtx_);
+    std::lock_guard<std::mutex> conn_lk(conn->mtx);
+    if(!conn->needs_processing)
+    {
+        conn->needs_processing = true;
+        std::lock_guard<std::mutex> lk(ready_to_write_mtx_);
+        ready_to_write_fd_queue_.push(conn->fd);
+    }
+    // ready_to_write_fd_queue_.push(fd);
 }
 
 void WebServer::handle_pending_writes()
 {
+    int clients_processed = 0;
+    std::shared_lock<std::shared_mutex> map_lk(conn_map_mtx_);
 
-    std::queue<int> fds_to_process;
+    //lock global queue, process our micro-batch
+    std::lock_guard<std::mutex> lk(ready_to_write_mtx_);
+    
+    while(!ready_to_write_fd_queue_.empty() && clients_processed < WRITE_BUDGET_PER_LOOP)
     {
-        std::lock_guard<std::mutex> lk(ready_to_write_mtx_);
-        fds_to_process.swap(ready_to_write_fd_queue_);
-    }
+        int fd = ready_to_write_fd_queue_.front();
+        ready_to_write_fd_queue_.pop();
+        clients_processed++;
 
-    std::unordered_set<int> unique_fds;
-    while(!fds_to_process.empty())
-    {
-        unique_fds.insert(fds_to_process.front());
-        fds_to_process.pop();
-    }
-
-    std::shared_lock<std::shared_mutex> lk(conn_map_mtx_);
-
-    // for(auto& c : connections_)
-    for(int fd : unique_fds)
-    {
         auto it = connections_.find(fd);
         if(it == connections_.end()) continue;
+
         ConnPtr conn = it->second;
-        
-        // auto& conn = c.second;
 
-        if(!conn || conn->closed.load()) continue;
-        
-        std::lock_guard<std::mutex> conn_lk(conn->mtx);
-        if(!conn->incoming_buf.empty())
+        if(!conn || conn->closed.load())
         {
-            conn->out_buf.append(conn->incoming_buf);
-            conn->incoming_buf.clear();
+            continue;
         }
 
-        if(!conn->out_buf.empty() && !conn->is_write_armed)
         {
-            mod_fd_epoll(conn->fd, EPOLLIN | EPOLLOUT);
-            conn->is_write_armed = true;
-        }
+            std::lock_guard<std::mutex> conn_lk(conn->mtx);
+            conn->needs_processing = false;
 
+            //drain the incoming queue into the out_buf
+            while(!conn->incoming_message_queue.empty())
+            {
+                conn->out_buf.append(*conn->incoming_message_queue.front());
+                conn->incoming_message_queue.pop();
+            }
+
+            //arm epollout if it's not already armed and has data
+            if(!conn->out_buf.empty() && !conn->is_write_armed)
+            {
+                mod_fd_epoll(conn->fd, EPOLLIN | EPOLLOUT);
+                conn->is_write_armed = true;
+            }
+        }
+        
     }
 }
+
 
 void WebServer::run()
 {
@@ -474,7 +569,14 @@ void WebServer::run()
                 }
             }
         }
+
+
+        if(!ready_to_write_fd_queue_.empty())
+        {
+            handle_pending_writes();
+        }
     }
+
     stop();
 }
 

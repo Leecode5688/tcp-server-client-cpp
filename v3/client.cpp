@@ -106,8 +106,7 @@ bool Client::login()
             // We didn't get a full message yet; continue receiving
             continue;
         }
-
-        std::cout << server_msg_payload << std::flush;
+        std::cout << "\r\033[K" << server_msg_payload << std::flush;
         
         if(server_msg_payload.find("Username accepted!") != std::string::npos)
         {
@@ -132,7 +131,7 @@ bool Client::login()
             }
 
             std::cout<<std::endl;
-
+            
             //v3
             uint32_t len = username_.size();
             uint32_t net_len = htonl(len);
@@ -153,6 +152,7 @@ bool Client::login()
         {
             prompt_ = "[" + username_ + "]: ";
         }
+
     }
     return login_success;
 }
