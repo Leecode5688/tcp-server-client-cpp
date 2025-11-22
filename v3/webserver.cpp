@@ -228,7 +228,7 @@ void WebServer::handle_login_task(ConnPtr conn, std::string username)
     if(validName)
     {
         conn->username = username;
-        conn->state = ConnState::ACTIVE;
+        // conn->state = ConnState::ACTIVE;
         response_msg = "[Server]: Username accepted! You have entered the chat!\n";
         needs_broadcast = true;
     }
@@ -244,6 +244,11 @@ void WebServer::handle_login_task(ConnPtr conn, std::string username)
         conn->incoming_message_queue.push(pkt_ptr);
     }
     mark_fd_for_writing(conn);
+
+    if(validName)
+    {
+        conn->state = ConnState::ACTIVE;
+    }
 
     if(needs_broadcast)
     {
@@ -305,9 +310,12 @@ void WebServer::handle_read(ConnPtr conn)
         if(n > 0)
         {
             std::lock_guard<std::mutex> lk(conn->mtx);
-            conn->in_buf.append(buffer, n);
+            // conn->in_buf.append(buffer, n);
+            if(conn->in_buf.write(buffer, n) < (size_t)n)
+            {
+                std::cerr<<"RingBuffer full for client "<<conn->fd<<", dropping data.\n";
+            }
             
-            //v3 change: replace the \n find() loop
             while(true)
             {
                 //do we have 4-byte header now?
@@ -317,8 +325,14 @@ void WebServer::handle_read(ConnPtr conn)
                 }
 
                 //if yes, read the header 
+
+                char header[4];
+                conn->in_buf.peek(header, 4);
+
                 uint32_t net_len;
-                memcpy(&net_len, conn->in_buf.data(), sizeof(uint32_t));
+                // memcpy(&net_len, conn->in_buf.data(), sizeof(uint32_t));
+                memcpy(&net_len, header, sizeof(uint32_t));
+
                 uint32_t payload_len = ntohl(net_len);
                 
                 if(payload_len > MAX_PAYLOAD_SIZE)
@@ -335,8 +349,19 @@ void WebServer::handle_read(ConnPtr conn)
                 }
                 
                 //if yes, do message extraction
-                std::string line = conn->in_buf.substr(sizeof(uint32_t), payload_len);
-                conn->in_buf.erase(0, sizeof(uint32_t) + payload_len);
+                // std::string line = conn->in_buf.substr(sizeof(uint32_t), payload_len);
+                // conn->in_buf.erase(0, sizeof(uint32_t) + payload_len);
+                
+                std::string line;
+                line.resize(payload_len);
+                //consume header
+                conn->in_buf.consume(sizeof(uint32_t));
+                
+                //read payload
+                conn->in_buf.peek(&line[0], payload_len);
+
+                //consume payload
+                conn->in_buf.consume(payload_len);
 
                 if(conn->state == ConnState::AWAITING_USERNAME)
                 {
@@ -374,13 +399,22 @@ void WebServer::handle_write(ConnPtr conn)
     
     while(!conn->out_buf.empty())
     {
-        ssize_t n = send(conn->fd, conn->out_buf.data(), conn->out_buf.size(), MSG_NOSIGNAL);
+        // ssize_t n = send(conn->fd, conn->out_buf.data(), conn->out_buf.size(), MSG_NOSIGNAL);
+        
+        //get the pointer of the furrst contiguous chunk of data
+        const char* data_ptr = conn->out_buf.get_read_ptr();
+        //get the size of the chunk, up to the end if buffer
+        size_t data_len = conn->out_buf.get_contiguous_read_size();
+        ssize_t n = send(conn->fd, data_ptr, data_len, MSG_NOSIGNAL); 
+
         if(n > 0)
         {
-            conn->out_buf.erase(0, n);
+            // conn->out_buf.erase(0, n);
+            conn->out_buf.consume(n);
         }
         else if(n == -1 && (errno == EAGAIN || errno == EWOULDBLOCK))
         {
+            
             return;
         }
         else
@@ -391,7 +425,6 @@ void WebServer::handle_write(ConnPtr conn)
     }
     mod_fd_epoll(conn->fd, EPOLLIN);
     conn->is_write_armed = false;
-
 
     //check if more works are queued when we were sending
     if(!conn->incoming_message_queue.empty())
@@ -482,7 +515,11 @@ void WebServer::handle_pending_writes()
             //drain the incoming queue into the out_buf
             while(!conn->incoming_message_queue.empty())
             {
-                conn->out_buf.append(*conn->incoming_message_queue.front());
+                // conn->out_buf.append(*conn->incoming_message_queue.front());
+
+                auto msg_ptr = conn->incoming_message_queue.front();
+                conn->out_buf.write(msg_ptr->data(), msg_ptr->size());
+
                 conn->incoming_message_queue.pop();
             }
 
