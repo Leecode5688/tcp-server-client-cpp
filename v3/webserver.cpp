@@ -11,6 +11,7 @@
 #include <arpa/inet.h>
 #include <sys/signalfd.h>
 #include <sys/eventfd.h>
+#include <sys/uio.h>
 
 #define BACKLOG 128
 #define BUFFER_SIZE 4096
@@ -25,7 +26,6 @@ WebServer::WebServer(int port, int n_workers) :
     setup_epoll();
     setup_eventfd();
 
-    // threadpool_ = std::make_unique<ThreadPool>(n_workers_, notify_fd_, *this);
     threadpool_ = std::make_unique<ThreadPool>(n_workers, notify_fd_);
 }
 
@@ -48,7 +48,6 @@ std::string WebServer::format_message(const std::string& msg)
 std::vector<ConnPtr> WebServer::get_active_connections()
 {
     std::vector<ConnPtr> active_conns;
-    // std::lock_guard<std::mutex> lk(conn_map_mtx_);
     std::shared_lock<std::shared_mutex> lk(conn_map_mtx_);
     active_conns.reserve(connections_.size());
     for(const auto& conn_pair : connections_)
@@ -165,6 +164,8 @@ void WebServer::mod_fd_epoll(int fd, uint32_t events)
 
 void WebServer::accept_loop()
 {
+    bool accept_any = false;
+
     while(true)
     {
         sockaddr_in client_addr{};
@@ -183,7 +184,6 @@ void WebServer::accept_loop()
         set_nonblocking(client_fd);
         ConnPtr conn = std::make_shared<Connection>(client_fd);
         {
-            // std::lock_guard<std::mutex> lk(conn_map_mtx_);
             std::lock_guard<std::shared_mutex> lk(conn_map_mtx_);
             connections_[client_fd] = conn;
         }
@@ -195,16 +195,21 @@ void WebServer::accept_loop()
         std::cout<<"Accepted "<<ip<<":"<<ntohs(client_addr.sin_port)
             <<" fd = "<<client_fd<<"\n";
 
-        std::string welcomeMessage = format_message("[Server]: Welcome! Please enter your username: ");
-        // send(client_fd, welcomeMessage.c_str(), welcomeMessage.size(), 0);
-        
+        std::string welcomeMessage = "[Server]: Welcome! Please enter your username: ";
         auto welcome_pkt = std::make_shared<std::string>(format_message(welcomeMessage));
         {
             std::lock_guard<std::mutex> conn_lk(conn->mtx);
-            conn->incoming_message_queue.push(welcome_pkt);
+            conn->outgoing_queue.push_back(welcome_pkt);
         }
         
         mark_fd_for_writing(conn);
+        uint64_t one = 1;
+        accept_any = true;
+
+        write(notify_fd_, &one, sizeof(one));
+    }
+    if(accept_any)
+    {
         uint64_t one = 1;
         write(notify_fd_, &one, sizeof(one));
     }
@@ -228,7 +233,6 @@ void WebServer::handle_login_task(ConnPtr conn, std::string username)
     if(validName)
     {
         conn->username = username;
-        // conn->state = ConnState::ACTIVE;
         response_msg = "[Server]: Username accepted! You have entered the chat!\n";
         needs_broadcast = true;
     }
@@ -241,7 +245,7 @@ void WebServer::handle_login_task(ConnPtr conn, std::string username)
     auto pkt_ptr = std::make_shared<std::string>(format_message(response_msg));
     {
         std::lock_guard<std::mutex> conn_lk(conn->mtx);
-        conn->incoming_message_queue.push(pkt_ptr);
+        conn->outgoing_queue.push_back(pkt_ptr);
     }
     mark_fd_for_writing(conn);
 
@@ -291,7 +295,7 @@ void WebServer::handle_broadcast_task(ConnPtr sender_conn, std::string message)
 
         {
             std::lock_guard<std::mutex> conn_lk(conn->mtx);
-            conn->incoming_message_queue.push(packet_ptr);
+            conn->outgoing_queue.push_back(packet_ptr);
         }
         mark_fd_for_writing(conn);
     }
@@ -306,6 +310,15 @@ void WebServer::handle_read(ConnPtr conn)
     char buffer[BUFFER_SIZE] = {0};
     while(true)
     {
+        {
+            std::lock_guard<std::mutex> lk(conn->mtx);
+            if(conn->in_buf.full())
+            {
+                mod_fd_epoll(conn->fd, 0);
+                return;
+            }
+        }
+
         ssize_t n = recv(conn->fd, buffer, sizeof(buffer), 0);
         if(n > 0)
         {
@@ -314,6 +327,8 @@ void WebServer::handle_read(ConnPtr conn)
             if(conn->in_buf.write(buffer, n) < (size_t)n)
             {
                 std::cerr<<"RingBuffer full for client "<<conn->fd<<", dropping data.\n";
+                close_conn(conn);
+                return;
             }
             
             while(true)
@@ -349,9 +364,6 @@ void WebServer::handle_read(ConnPtr conn)
                 }
                 
                 //if yes, do message extraction
-                // std::string line = conn->in_buf.substr(sizeof(uint32_t), payload_len);
-                // conn->in_buf.erase(0, sizeof(uint32_t) + payload_len);
-                
                 std::string line;
                 line.resize(payload_len);
                 //consume header
@@ -395,47 +407,74 @@ void WebServer::handle_read(ConnPtr conn)
 
 void WebServer::handle_write(ConnPtr conn)
 {
-    std::lock_guard<std::mutex> conn_lk(conn->mtx);
-    
-    while(!conn->out_buf.empty())
-    {
-        // ssize_t n = send(conn->fd, conn->out_buf.data(), conn->out_buf.size(), MSG_NOSIGNAL);
-        
-        //get the pointer of the furrst contiguous chunk of data
-        const char* data_ptr = conn->out_buf.get_read_ptr();
-        //get the size of the chunk, up to the end if buffer
-        size_t data_len = conn->out_buf.get_contiguous_read_size();
-        ssize_t n = send(conn->fd, data_ptr, data_len, MSG_NOSIGNAL); 
+    std::lock_guard<std::mutex> lk(conn->mtx);
 
-        if(n > 0)
+    if(!conn->outgoing_queue.empty())
+    {
+        std::vector<struct iovec> iov;
+        const int IOV_LIMIT = 64;
+        // size_t bytes_to_send = 0;
+        int count = 0;
+
+        for(const auto& msg_ptr : conn->outgoing_queue)
         {
-            // conn->out_buf.erase(0, n);
-            conn->out_buf.consume(n);
-        }
-        else if(n == -1 && (errno == EAGAIN || errno == EWOULDBLOCK))
-        {
+            if(count >= IOV_LIMIT) break;
+            struct iovec v;
             
-            return;
+            v.iov_base = (void*)msg_ptr->data();
+            v.iov_len = msg_ptr->size();
+            iov.push_back(v);
+            count++;
+        }
+
+        ssize_t n = writev(conn->fd, iov.data(), iov.size());
+
+        if(n < 0)
+        {
+            if(errno != EAGAIN && errno != EWOULDBLOCK)
+            {
+                close_conn(conn);
+                return;
+            }
         }
         else
         {
-            close_conn(conn);
-            return;
+            size_t bytes_cleared = 0;
+            while(!conn->outgoing_queue.empty())
+            {
+                auto& msg = conn->outgoing_queue.front();
+                if(bytes_cleared + msg->size() <= (size_t)n)
+                {
+                    bytes_cleared += msg->size();
+                    conn->outgoing_queue.pop_front();
+                }
+                else
+                {
+                    size_t bytes_sent_from_msg = n - bytes_cleared;
+                    *msg = msg->substr(bytes_sent_from_msg);
+                    break;
+                }
+            }
         }
     }
-    mod_fd_epoll(conn->fd, EPOLLIN);
-    conn->is_write_armed = false;
 
-    //check if more works are queued when we were sending
-    if(!conn->incoming_message_queue.empty())
+    uint32_t final_events = 0;
+    if(!conn->in_buf.full())
     {
-        if(!conn->needs_processing)
-        {
-            conn->needs_processing = true;
-            std::lock_guard<std::mutex> lk(ready_to_write_mtx_);
-            ready_to_write_fd_queue_.push(conn->fd);
-        }
+        final_events |= EPOLLIN;
     }
+    
+    if(!conn->outgoing_queue.empty())
+    {
+        final_events |= EPOLLOUT;
+        conn->is_write_armed = true;
+    }
+    else
+    {
+        conn->is_write_armed = false;
+    }
+
+    mod_fd_epoll(conn->fd, final_events);
 }
 
 void WebServer::close_conn(ConnPtr conn)
@@ -453,7 +492,6 @@ void WebServer::close_conn(ConnPtr conn)
 
     if(!leave_msg.empty())
     {
-        // threadpool_->push_task(nullptr, leave_msg);
         threadpool_->push_task([this, leave_msg] {
             this->handle_broadcast_task(nullptr, leave_msg);
         });
@@ -462,7 +500,6 @@ void WebServer::close_conn(ConnPtr conn)
     epoll_ctl(epoll_fd_, EPOLL_CTL_DEL, conn->fd, nullptr);
     close(conn->fd);
     {
-        // std::lock_guard<std::mutex> lk(conn_map_mtx_);
         std::unique_lock<std::shared_mutex> lk(conn_map_mtx_);
         connections_.erase(conn->fd);
     }
@@ -470,10 +507,8 @@ void WebServer::close_conn(ConnPtr conn)
     std::cout<<"Closed fd = "<<conn->fd<<"\n";
 }
 
-// void WebServer::mark_fd_for_writing(int fd)
 void WebServer::mark_fd_for_writing(const ConnPtr& conn)
 {
-    // std::lock_guard<std::mutex> lk(ready_to_write_mtx_);
     std::lock_guard<std::mutex> conn_lk(conn->mtx);
     if(!conn->needs_processing)
     {
@@ -481,14 +516,12 @@ void WebServer::mark_fd_for_writing(const ConnPtr& conn)
         std::lock_guard<std::mutex> lk(ready_to_write_mtx_);
         ready_to_write_fd_queue_.push(conn->fd);
     }
-    // ready_to_write_fd_queue_.push(fd);
 }
 
 void WebServer::handle_pending_writes()
 {
     int clients_processed = 0;
     std::shared_lock<std::shared_mutex> map_lk(conn_map_mtx_);
-
     //lock global queue, process our micro-batch
     std::lock_guard<std::mutex> lk(ready_to_write_mtx_);
     
@@ -512,19 +545,7 @@ void WebServer::handle_pending_writes()
             std::lock_guard<std::mutex> conn_lk(conn->mtx);
             conn->needs_processing = false;
 
-            //drain the incoming queue into the out_buf
-            while(!conn->incoming_message_queue.empty())
-            {
-                // conn->out_buf.append(*conn->incoming_message_queue.front());
-
-                auto msg_ptr = conn->incoming_message_queue.front();
-                conn->out_buf.write(msg_ptr->data(), msg_ptr->size());
-
-                conn->incoming_message_queue.pop();
-            }
-
-            //arm epollout if it's not already armed and has data
-            if(!conn->out_buf.empty() && !conn->is_write_armed)
+            if(!conn->outgoing_queue.empty() && !conn->is_write_armed)
             {
                 mod_fd_epoll(conn->fd, EPOLLIN | EPOLLOUT);
                 conn->is_write_armed = true;
@@ -578,7 +599,6 @@ void WebServer::run()
             {
                 ConnPtr conn;
                 {
-                    // std::lock_guard<std::mutex> lk(conn_map_mtx_);
                     std::shared_lock<std::shared_mutex> lk(conn_map_mtx_);
                     auto it = connections_.find(fd);
                     if(it != connections_.end())
@@ -626,7 +646,6 @@ void WebServer::stop()
     }
 
     {
-        // std::lock_guard<std::mutex> lk(conn_map_mtx_);
         std::unique_lock<std::shared_mutex> lk(conn_map_mtx_);
         for(auto& c : connections_)
         {

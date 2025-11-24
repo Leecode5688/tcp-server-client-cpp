@@ -6,8 +6,6 @@
 #include <sys/eventfd.h>
 #include <iostream>
 
-// ThreadPool::ThreadPool(size_t n_workers, int notify_fd, WebServer& server):
-//     notify_fd_(notify_fd), server_(server)
 
 ThreadPool::ThreadPool(size_t n_workers, int notify_fd):
     notify_fd_(notify_fd)

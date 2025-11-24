@@ -16,21 +16,14 @@ private:
     void worker_loop();
     std::vector<std::thread> workers_;
     std::queue<std::function<void()>> task_queue_;
-
-    // std::queue<std::pair<ConnPtr, std::string>> task_queue_;
     std::mutex queue_mtx_;
     std::condition_variable queue_cv_;
     std::atomic<bool> running_{true};
     int notify_fd_;
 
-    // WebServer& server_;
 public:
-    // ThreadPool(size_t n_workers, int notify_fd, WebServer& server);
     ThreadPool(size_t n_workers, int notify_fd);
     ~ThreadPool();
-
-    // void push_task(ConnPtr conn, std::string msg);
-    void push_task(std::function<void()> task);
-    
+    void push_task(std::function<void()> task);    
     void shutdown();
 };

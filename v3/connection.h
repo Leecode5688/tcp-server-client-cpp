@@ -4,6 +4,7 @@
 #include <atomic>
 #include <memory>
 #include <queue>
+#include <deque>
 #include "ringbuffer.h"
 
 enum class ConnState {
@@ -11,21 +12,15 @@ enum class ConnState {
     ACTIVE
 };
 
-//add double buffer to reduce lock time 
 struct Connection {
     int fd;
     std::string username;
     ConnState state = ConnState::AWAITING_USERNAME;
-
-    // std::string in_buf;
-    //out_buf now will only be used by main WebServer thread
-    // std::string out_buf;
     
     RingBuffer in_buf{8192};
-    RingBuffer out_buf{8192};
+    // RingBuffer out_buf{8192};
 
-    //replace  string incoming_buf with queue that holds
-    std::queue<std::shared_ptr<std::string>> incoming_message_queue;
+    std::deque<std::shared_ptr<std::string>> outgoing_queue;
 
     std::mutex mtx;
     std::atomic<bool> closed{false};
