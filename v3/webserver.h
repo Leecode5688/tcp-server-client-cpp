@@ -56,6 +56,7 @@ public:
     void mod_fd_epoll(int fd, uint32_t events);
     std::vector<ConnPtr> get_active_connections();
 
+    // void mark_fd_for_writing(int fd);
     void mark_fd_for_writing(const ConnPtr& conn);
 
     void run();

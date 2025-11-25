@@ -1,4 +1,5 @@
 #include "webserver.h"
+#include "utils.h"
 #include <iostream>
 #include <cstring>
 #include <csignal>
@@ -65,14 +66,16 @@ void WebServer::setup_signalfd()
     sigaddset(&mask, SIGTERM);
     if(sigprocmask(SIG_BLOCK, &mask, nullptr) == -1)
     {
-        perror("sigprocmask");
+        // perror("sigprocmask");
+        LOG_ERROR("sigprocmask failed: " + std::string(strerror(errno)));
         exit(1);
     }
 
     sig_fd_ = signalfd(-1, &mask, SFD_NONBLOCK | SFD_CLOEXEC);
     if(sig_fd_ == -1)
     {
-        perror("signalfd");
+        // perror("signalfd");
+        LOG_ERROR("signalfd failed: "+ std::string(strerror(errno)));
         exit(1);
     }
 }
@@ -82,14 +85,14 @@ void WebServer::setup_server_socket()
     listen_fd_ = socket(AF_INET, SOCK_STREAM, 0);
     if(listen_fd_ < 0)
     {
-        perror("Socket creation failed!!");
-        exit(1);
+        LOG_ERROR("Socket creation failed: " + std::string(strerror(errno)));        exit(1);
     }
 
     int opt = 1;
     if(setsockopt(listen_fd_, SOL_SOCKET, SO_REUSEADDR, &opt, sizeof(opt)))
     {
-        perror("Setsockopt failed!!");
+        // perror("Setsockopt failed!!");
+        LOG_ERROR("Setsockopt failed: " + std::string(strerror(errno)));
         exit(1);
     }
 
@@ -100,13 +103,17 @@ void WebServer::setup_server_socket()
 
     if(bind(listen_fd_, (sockaddr*)&server_addr, sizeof(server_addr)) < 0)
     {
-        perror("Bind failed!!");
+        // perror("Bind failed!!");
+        LOG_ERROR("Bind failed: " + std::string(strerror(errno)));
+
         exit(1);
     }
 
     if(listen(listen_fd_, BACKLOG) < 0)
     {
-        perror("Listen failed!!");
+        // perror("Listen failed!!");
+        LOG_ERROR("Listen failed: " + std::string(strerror(errno)));
+
         exit(1);
     }
     set_nonblocking(listen_fd_);
@@ -117,7 +124,9 @@ void WebServer::setup_epoll()
     epoll_fd_ = epoll_create1(0);
     if(epoll_fd_ == -1)
     {
-        perror("epoll_create1");
+        // perror("epoll_create1");
+        LOG_ERROR("epoll_create1: " + std::string(strerror(errno)));
+
         exit(1);
     }
     add_fd_to_epoll(listen_fd_, EPOLLIN);
@@ -130,7 +139,9 @@ void WebServer::setup_eventfd()
     notify_fd_ = eventfd(0, EFD_NONBLOCK | EFD_CLOEXEC);
     if(notify_fd_ == -1)
     {
-        perror("eventfd");
+        // perror("eventfd");
+        LOG_ERROR("eventfd: " + std::string(strerror(errno)));
+
         exit(1);
     }
     add_fd_to_epoll(notify_fd_, EPOLLIN);
@@ -176,7 +187,9 @@ void WebServer::accept_loop()
             if(errno == EAGAIN || errno == EWOULDBLOCK) break;
             else
             {
-                perror("Accept failed!!");
+                // perror("Accept failed!!");
+                LOG_ERROR("Accept failed: " + std::string(strerror(errno)));
+
                 break;
             }
         }
@@ -188,12 +201,16 @@ void WebServer::accept_loop()
             connections_[client_fd] = conn;
         }
 
-        add_fd_to_epoll(client_fd, EPOLLIN);
+        // add_fd_to_epoll(client_fd, EPOLLIN);
+        add_fd_to_epoll(conn->fd(), EPOLLIN);
 
         char ip[INET_ADDRSTRLEN];
         inet_ntop(AF_INET, &client_addr.sin_addr, ip, sizeof(ip));
-        std::cout<<"Accepted "<<ip<<":"<<ntohs(client_addr.sin_port)
-            <<" fd = "<<client_fd<<"\n";
+        // std::cout<<"Accepted "<<ip<<":"<<ntohs(client_addr.sin_port)
+        //     <<" fd = "<<client_fd<<"\n";
+        
+        LOG_INFO("Accepted "+ std::string(ip) + ":" + std::to_string(ntohs(client_addr.sin_port))
+            + " fd = " + std::to_string(client_fd));
 
         std::string welcomeMessage = "[Server]: Welcome! Please enter your username: ";
         auto welcome_pkt = std::make_shared<std::string>(format_message(welcomeMessage));
@@ -288,7 +305,7 @@ void WebServer::handle_broadcast_task(ConnPtr sender_conn, std::string message)
         {
             continue;
         }
-        if(sender_conn && conn->fd == sender_conn->fd)
+        if(sender_conn && conn->fd() == sender_conn->fd())
         {
             continue;
         }
@@ -314,19 +331,19 @@ void WebServer::handle_read(ConnPtr conn)
             std::lock_guard<std::mutex> lk(conn->mtx);
             if(conn->in_buf.full())
             {
-                mod_fd_epoll(conn->fd, 0);
+                mod_fd_epoll(conn->fd(), 0);
                 return;
             }
         }
 
-        ssize_t n = recv(conn->fd, buffer, sizeof(buffer), 0);
+        ssize_t n = recv(conn->fd(), buffer, sizeof(buffer), 0);
         if(n > 0)
         {
             std::lock_guard<std::mutex> lk(conn->mtx);
             // conn->in_buf.append(buffer, n);
             if(conn->in_buf.write(buffer, n) < (size_t)n)
             {
-                std::cerr<<"RingBuffer full for client "<<conn->fd<<", dropping data.\n";
+                std::cerr<<"RingBuffer full for client "<<conn->fd()<<", dropping data.\n";
                 close_conn(conn);
                 return;
             }
@@ -352,7 +369,7 @@ void WebServer::handle_read(ConnPtr conn)
                 
                 if(payload_len > MAX_PAYLOAD_SIZE)
                 {
-                    std::cout<<"Client "<<conn->fd<<" sent invalid payload size: "<<payload_len<<std::endl;
+                    std::cout<<"Client "<<conn->fd()<<" sent invalid payload size: "<<payload_len<<std::endl;
                     close_conn(conn);
                     return;
                 }
@@ -427,7 +444,7 @@ void WebServer::handle_write(ConnPtr conn)
             count++;
         }
 
-        ssize_t n = writev(conn->fd, iov.data(), iov.size());
+        ssize_t n = writev(conn->fd(), iov.data(), iov.size());
 
         if(n < 0)
         {
@@ -474,7 +491,7 @@ void WebServer::handle_write(ConnPtr conn)
         conn->is_write_armed = false;
     }
 
-    mod_fd_epoll(conn->fd, final_events);
+    mod_fd_epoll(conn->fd(), final_events);
 }
 
 void WebServer::close_conn(ConnPtr conn)
@@ -497,14 +514,15 @@ void WebServer::close_conn(ConnPtr conn)
         });
     }
 
-    epoll_ctl(epoll_fd_, EPOLL_CTL_DEL, conn->fd, nullptr);
-    close(conn->fd);
+    // epoll_ctl(epoll_fd_, EPOLL_CTL_DEL, conn->fd, nullptr);
+    epoll_ctl(epoll_fd_, EPOLL_CTL_DEL, conn->fd(), nullptr);
+    // close(conn->fd);
     {
         std::unique_lock<std::shared_mutex> lk(conn_map_mtx_);
-        connections_.erase(conn->fd);
+        connections_.erase(conn->fd());
     }
-
-    std::cout<<"Closed fd = "<<conn->fd<<"\n";
+    // std::cout<<"Closed fd = "<<conn->fd<<"\n";
+    LOG_INFO("Closed fd = " + std::to_string(conn->fd()));
 }
 
 void WebServer::mark_fd_for_writing(const ConnPtr& conn)
@@ -514,7 +532,7 @@ void WebServer::mark_fd_for_writing(const ConnPtr& conn)
     {
         conn->needs_processing = true;
         std::lock_guard<std::mutex> lk(ready_to_write_mtx_);
-        ready_to_write_fd_queue_.push(conn->fd);
+        ready_to_write_fd_queue_.push(conn->fd());
     }
 }
 
@@ -547,7 +565,7 @@ void WebServer::handle_pending_writes()
 
             if(!conn->outgoing_queue.empty() && !conn->is_write_armed)
             {
-                mod_fd_epoll(conn->fd, EPOLLIN | EPOLLOUT);
+                mod_fd_epoll(conn->fd(), EPOLLIN | EPOLLOUT);
                 conn->is_write_armed = true;
             }
         }
@@ -558,7 +576,7 @@ void WebServer::handle_pending_writes()
 
 void WebServer::run()
 {
-    std::cout<<"Chat server listening on port "<<port_<<"... :)\n";
+    LOG_INFO("Chat server listening on port " + std::to_string(port_) + "...");    
     struct epoll_event events[MAX_EVENTS];
 
     while(running_)
@@ -568,7 +586,8 @@ void WebServer::run()
         {
             if(errno == EINTR) continue;
 
-            perror("epoll_wait");
+            // perror("epoll_wait");
+            LOG_ERROR("epoll_wait failed: " + std::string(strerror(errno)));
             break;
         }
 
@@ -585,7 +604,8 @@ void WebServer::run()
             {
                 struct signalfd_siginfo si;
                 read(sig_fd_, &si, sizeof(si));
-                std::cout<<"Signal received, shutting down...\n";
+                // std::cout<<"Signal received, shutting down...\n";
+                LOG_INFO("Signal received, shutting down...");
                 running_ = false;
                 break;
             }
@@ -647,10 +667,10 @@ void WebServer::stop()
 
     {
         std::unique_lock<std::shared_mutex> lk(conn_map_mtx_);
-        for(auto& c : connections_)
-        {
-            ::close(c.first);
-        }
+        // for(auto& c : connections_)
+        // {
+        //     ::close(c.first);
+        // }
         connections_.clear();
     }
 
@@ -670,4 +690,5 @@ void WebServer::stop()
     {
         close(notify_fd_);
     }
+    LOG_INFO("Server stopped and resources cleaned up!");
 }
