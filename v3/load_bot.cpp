@@ -6,9 +6,12 @@
 #include <sys/socket.h>
 #include <vector>
 #include <thread>
+#include <chrono>
+#include <netdb.h>
+
 
 #define PORT 8888
-#define SERVER_IP "127.0.0.1"
+// #define SERVER_IP "127.0.0.1"
 #define BUFFER_SIZE 4096
 
 std::string format_message(const std::string& msg)
@@ -48,6 +51,12 @@ std::string recv_message(int sock_fd)
     return std::string(payload_buf.begin(), payload_buf.end());
 }
 
+const char* get_server_ip()
+{
+    const char* ip = std::getenv("SERVER_IP");
+    return ip ? ip : "127.0.0.1";
+}
+
 int main(int argc, char** argv)
 {
     if(argc != 2)
@@ -64,17 +73,33 @@ int main(int argc, char** argv)
         return 1;
     }
 
-    sockaddr_in server_addr{};
-    server_addr.sin_family = AF_INET;
-    server_addr.sin_port = htons(PORT);
-    inet_pton(AF_INET, SERVER_IP, &server_addr.sin_addr);
+    // sockaddr_in server_addr{};
+    // server_addr.sin_family = AF_INET;
+    // server_addr.sin_port = htons(PORT);
+    // inet_pton(AF_INET, SERVER_IP, &server_addr.sin_addr);
+    struct addrinfo hints{}, *res;
+    hints.ai_family = AF_INET;
+    hints.ai_socktype = SOCK_STREAM;
 
-    if(connect(sock_fd, (struct sockaddr*)& server_addr, sizeof(server_addr)) < 0)
+    std::string server_host = get_server_ip();
+    int err = getaddrinfo(server_host.c_str(), std::to_string(PORT).c_str(), &hints, &res);
+
+    // if(connect(sock_fd, (struct sockaddr*)& server_addr, sizeof(server_addr)) < 0)
+    if(err != 0)
     {
-        perror("Connection failed!!");
+        std::cerr<<"getaddrinfo failed: "<<gai_strerror(err)<<std::endl;
         close(sock_fd);
         return 1;
     }
+    if(connect(sock_fd, res->ai_addr, res->ai_addrlen) < 0)
+    {
+        perror("Connection failed!!");
+        freeaddrinfo(res);
+        close(sock_fd);
+        return 1;
+    }
+
+    freeaddrinfo(res);
 
     std::string welcome = recv_message(sock_fd);
     if(welcome.empty())

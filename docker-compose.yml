@@ -1,0 +1,40 @@
+services:
+  server:
+    build:
+      context: .
+      dockerfile: Dockerfile
+    ports:
+      - "8888:8888"
+    ulimits:
+      nofile:
+        soft: 65535
+        hard: 65535
+    deploy:
+      resources:
+        limits:
+          cpus: '1.0'
+          memory: 512M
+
+  client:
+    build:
+      context: .
+      dockerfile: Dockerfile
+    command: ./epoll_client
+    environment:
+      - SERVER_IP=server
+    stdin_open: true
+    tty: true
+    depends_on:
+      - server
+
+  bots:
+    build:
+      context: .
+      dockerfile: Dockerfile
+    command: /bin/sh -c "./load_bot bot_$$(hostname)"
+    environment:
+      - SERVER_IP=server
+    depends_on:
+      - server
+    deploy:
+      replicas: 10

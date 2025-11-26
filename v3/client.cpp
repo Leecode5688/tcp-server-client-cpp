@@ -9,6 +9,7 @@
 #include <csignal>
 #include <iostream>
 #include <cstring>
+#include <netdb.h>
 
 #define BUFFER_SIZE 4096
 #define MAX_EVENTS 2
@@ -37,24 +38,33 @@ bool Client::connect_to_server()
         return false;
     }
 
-    sockaddr_in server_addr{};
-    server_addr.sin_family = AF_INET;
-    server_addr.sin_port = htons(port_);
+    // sockaddr_in server_addr{};
+    // server_addr.sin_family = AF_INET;
+    // server_addr.sin_port = htons(port_);
+    struct addrinfo hints{}, *res;
+    hints.ai_family = AF_INET;
+    hints.ai_socktype = SOCK_STREAM;
 
-    if(inet_pton(AF_INET, server_ip_.c_str(), &server_addr.sin_addr) <= 0)
+    // if(inet_pton(AF_INET, server_ip_.c_str(), &server_addr.sin_addr) <= 0)
+
+    int err = getaddrinfo(server_ip_.c_str(), std::to_string(port_).c_str(), &hints, &res);
+    if(err != 0)
     {
-        perror("Invalid address/ Address not supported!!");
+        std::cerr<<"getaddrinfo failed: "<<gai_strerror(err)<<std::endl;
         close(sock_fd_);
         return false;
     }
 
-    if(connect(sock_fd_, (struct sockaddr*)&server_addr, sizeof(server_addr)) < 0)
+    // if(connect(sock_fd_, (struct sockaddr*)&server_addr, sizeof(server_addr)) < 0)
+    if(connect(sock_fd_, res->ai_addr, res->ai_addrlen) < 0)
     {
         perror("Connection failed!!");
+        freeaddrinfo(res);
         close(sock_fd_);
         return false;
     }
 
+    freeaddrinfo(res);
     return true;
 }
 

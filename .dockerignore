@@ -1,0 +1,12 @@
+v3/build/
+v3/cmake-build-debug/
+
+*.log
+v3/server.log
+
+.git/
+.gitignore
+
+.vscode/
+.idea/
+.DS_Store
