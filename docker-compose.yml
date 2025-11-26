@@ -9,11 +9,12 @@ services:
       nofile:
         soft: 65535
         hard: 65535
+    restart: on-failure
     deploy:
       resources:
         limits:
           cpus: '1.0'
-          memory: 512M
+          memory: 2G
 
   client:
     build:
@@ -31,7 +32,7 @@ services:
     build:
       context: .
       dockerfile: Dockerfile
-    command: /bin/sh -c "./load_bot bot_$$(hostname)"
+    command: /bin/sh -c "for i in $$(seq 1 10); do ./load_bot bot_$$(hostname)_$$i & done; wait"
     environment:
       - SERVER_IP=server
     depends_on:
