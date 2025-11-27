@@ -15,9 +15,19 @@
 #include <sys/uio.h>
 
 #define BACKLOG 128
-#define BUFFER_SIZE 4096
+// #define BUFFER_SIZE 4096
 #define MAX_EVENTS 128
 #define MAX_PAYLOAD_SIZE (1024 * 4)
+#define WRITE_BUDGET_PER_LOOP 100
+
+//hard limit, if queue has > 10k messages, drop packets
+#define MAX_OUTGOING_QUEUE_SIZE 10000
+
+//high water mark: stop reading from client if they have this much pending data
+#define HIGH_WATER_MARK (8 * 1024 * 1024)
+//low water mark => resume reading once they drain to this level
+#define LOW_WATER_MARK (4 * 1024 * 1024)
+
 
 WebServer::WebServer(int port, int n_workers) : 
     port_(port), n_workers_(n_workers), running_(true)
@@ -34,16 +44,12 @@ WebServer::~WebServer(){
     stop();
 }
 
-//helper function to format messages before queuing
-std::string WebServer::format_message(const std::string& msg)
+OutgoingPacket make_packet(const std::string& msg)
 {
-    uint32_t len = msg.size();
-    uint32_t net_len = htonl(len);
-
-    std::string packet;
-    packet.append(reinterpret_cast<const char*>(&net_len), sizeof(uint32_t));
-    packet.append(msg);
-    return packet;
+    OutgoingPacket pkt;
+    pkt.payload = std::make_shared<std::vector<char>>(msg.begin(), msg.end());
+    pkt.net_len = htonl(pkt.payload->size());
+    return pkt;
 }
 
 std::vector<ConnPtr> WebServer::get_active_connections()
@@ -61,12 +67,14 @@ std::vector<ConnPtr> WebServer::get_active_connections()
 void WebServer::setup_signalfd()
 {
     sigset_t mask;
+    
     sigemptyset(&mask);
     sigaddset(&mask, SIGINT);
     sigaddset(&mask, SIGTERM);
+    sigaddset(&mask, SIGPIPE);
+
     if(sigprocmask(SIG_BLOCK, &mask, nullptr) == -1)
     {
-        // perror("sigprocmask");
         LOG_ERROR("sigprocmask failed: " + std::string(strerror(errno)));
         exit(1);
     }
@@ -74,7 +82,6 @@ void WebServer::setup_signalfd()
     sig_fd_ = signalfd(-1, &mask, SFD_NONBLOCK | SFD_CLOEXEC);
     if(sig_fd_ == -1)
     {
-        // perror("signalfd");
         LOG_ERROR("signalfd failed: "+ std::string(strerror(errno)));
         exit(1);
     }
@@ -213,12 +220,18 @@ void WebServer::accept_loop()
             + " fd = " + std::to_string(client_fd));
 
         std::string welcomeMessage = "[Server]: Welcome! Please enter your username: ";
-        auto welcome_pkt = std::make_shared<std::string>(format_message(welcomeMessage));
+        // auto welcome_pkt = std::make_shared<std::string>(format_message(welcomeMessage));
+        // {
+        //     std::lock_guard<std::mutex> conn_lk(conn->mtx);
+        //     conn->outgoing_queue.push_back(welcome_pkt);
+        // }
+        
+        OutgoingPacket pkt = make_packet(welcomeMessage);
         {
             std::lock_guard<std::mutex> conn_lk(conn->mtx);
-            conn->outgoing_queue.push_back(welcome_pkt);
+            conn->outgoing_queue.push_back(pkt);
         }
-        
+
         mark_fd_for_writing(conn);
         uint64_t one = 1;
         accept_any = true;
@@ -249,7 +262,10 @@ void WebServer::handle_login_task(ConnPtr conn, std::string username)
 
     if(validName)
     {
-        conn->username = username;
+        {
+            std::lock_guard<std::mutex> conn_lk(conn->mtx);
+            conn->username = username;
+        }
         response_msg = "[Server]: Username accepted! You have entered the chat!\n";
         needs_broadcast = true;
     }
@@ -258,44 +274,54 @@ void WebServer::handle_login_task(ConnPtr conn, std::string username)
         response_msg = "[Server]: Username is invalid or already used. Please try another one: ";    
     }
 
-    //queue the packet for this client
-    auto pkt_ptr = std::make_shared<std::string>(format_message(response_msg));
+    OutgoingPacket pkt = make_packet(response_msg);
     {
         std::lock_guard<std::mutex> conn_lk(conn->mtx);
-        conn->outgoing_queue.push_back(pkt_ptr);
+        conn->outgoing_queue.push_back(pkt);
+
+        conn->pending_bytes += (4 + pkt.payload->size());
     }
+
     mark_fd_for_writing(conn);
 
     if(validName)
     {
+        std::lock_guard<std::mutex> conn_lk(conn->mtx);
         conn->state = ConnState::ACTIVE;
     }
 
     if(needs_broadcast)
     {
-        std::string joinMessage = "[Server]: " + conn->username + " has joined the chatroom!\n";    
-        threadpool_->push_task([this, joinMessage]{
-            this->handle_broadcast_task(nullptr, joinMessage);
-        });
+        std::string joinMessage = "[Server]: " + username + " has joined the chatroom!\n";    
+        auto payload_ptr = std::make_shared<std::vector<char>>(joinMessage.begin(), joinMessage.end());
+        handle_broadcast_task(nullptr, payload_ptr);
     }
 
     uint64_t one = 1;
     write(notify_fd_, &one, sizeof(one));
 }
 
-void WebServer::handle_broadcast_task(ConnPtr sender_conn, std::string message)
+void WebServer::handle_broadcast_task(ConnPtr sender_conn, std::shared_ptr<std::vector<char>> payload)
 {
-    std::string broadcast_msg;
+    std::shared_ptr<std::vector<char>> final_payload;
+
     if(sender_conn)
     {
-        broadcast_msg = "[" + sender_conn->username + "]: " + message;    
+        std::string prefix = "[" + sender_conn->username + "]: ";
+        final_payload = std::make_shared<std::vector<char>>();
+        final_payload->reserve(prefix.size() + payload->size());
+
+        final_payload->insert(final_payload->end(), prefix.begin(), prefix.end());
+        final_payload->insert(final_payload->end(), payload->begin(), payload->end());
     }
     else
     {
-        broadcast_msg = message;
+        final_payload = payload;
     }
 
-    auto packet_ptr = std::make_shared<std::string>(format_message(broadcast_msg));
+    OutgoingPacket packet;
+    packet.net_len = htonl(final_payload->size());
+    packet.payload = final_payload;
 
     std::vector<ConnPtr> active_conns = get_active_connections();
 
@@ -312,7 +338,23 @@ void WebServer::handle_broadcast_task(ConnPtr sender_conn, std::string message)
 
         {
             std::lock_guard<std::mutex> conn_lk(conn->mtx);
-            conn->outgoing_queue.push_back(packet_ptr);
+            //hard limit check
+            if(conn->outgoing_queue.size() >= MAX_OUTGOING_QUEUE_SIZE)
+            {
+                continue;
+            }
+
+            conn->outgoing_queue.push_back(packet);
+            //add bytes
+            conn->pending_bytes += (4 + final_payload->size());
+
+            //check high water mark
+            if(!conn->is_reading_paused && conn->pending_bytes >= HIGH_WATER_MARK)
+            {
+                conn->is_reading_paused = true;
+                mod_fd_epoll(conn->fd(), EPOLLOUT);
+                LOG_INFO("Client " + std::to_string(conn->fd()) + " paused (High Water Mark)");
+            }
         }
         mark_fd_for_writing(conn);
     }
@@ -324,29 +366,27 @@ void WebServer::handle_broadcast_task(ConnPtr sender_conn, std::string message)
 
 void WebServer::handle_read(ConnPtr conn)
 {
-    char buffer[BUFFER_SIZE] = {0};
+    // char buffer[BUFFER_SIZE] = {0};
     while(true)
     {
+        
+        std::lock_guard<std::mutex> lk(conn->mtx);
+
+        auto [buf_ptr, buf_len] = conn->in_buf.get_writeable_buffer();
+
+        if(buf_len == 0)
         {
-            std::lock_guard<std::mutex> lk(conn->mtx);
-            if(conn->in_buf.full())
-            {
-                mod_fd_epoll(conn->fd(), 0);
-                return;
-            }
+            uint32_t events = 0;
+            if(!conn->outgoing_queue.empty()) events |= EPOLLOUT;  
+            mod_fd_epoll(conn->fd(), events);
+            return;
         }
 
-        ssize_t n = recv(conn->fd(), buffer, sizeof(buffer), 0);
+        ssize_t n = recv(conn->fd(), buf_ptr, buf_len, 0);
+
         if(n > 0)
-        {
-            std::lock_guard<std::mutex> lk(conn->mtx);
-            // conn->in_buf.append(buffer, n);
-            if(conn->in_buf.write(buffer, n) < (size_t)n)
-            {
-                std::cerr<<"RingBuffer full for client "<<conn->fd()<<", dropping data.\n";
-                close_conn(conn);
-                return;
-            }
+        {   
+            conn->in_buf.commit_write(n);
             
             while(true)
             {
@@ -379,30 +419,25 @@ void WebServer::handle_read(ConnPtr conn)
                 {
                     break;
                 }
-                
-                //if yes, do message extraction
-                std::string line;
-                line.resize(payload_len);
-                //consume header
+
                 conn->in_buf.consume(sizeof(uint32_t));
                 
-                //read payload
-                conn->in_buf.peek(&line[0], payload_len);
+                auto payload_ptr = std::make_shared<std::vector<char>>(payload_len);
 
-                //consume payload
+                conn->in_buf.peek(payload_ptr->data(), payload_len);
                 conn->in_buf.consume(payload_len);
 
                 if(conn->state == ConnState::AWAITING_USERNAME)
                 {
-                    threadpool_->push_task([this, conn, line]{
-                        this->handle_login_task(conn, line);
+                    std::string username(payload_ptr->begin(), payload_ptr->end());
+                    threadpool_->push_task([this, conn, username]{
+                        this->handle_login_task(conn, username);
                     });
                 }
                 else if(conn->state == ConnState::ACTIVE)
                 {
-                    // threadpool_->push_task(conn, line);
-                    threadpool_->push_task([this, conn, line] {
-                        this->handle_broadcast_task(conn, line);
+                    threadpool_->push_task([this, conn, payload_ptr]{
+                        this->handle_broadcast_task(conn, payload_ptr);
                     });
                 }
             }
@@ -431,17 +466,42 @@ void WebServer::handle_write(ConnPtr conn)
         std::vector<struct iovec> iov;
         const int IOV_LIMIT = 64;
         // size_t bytes_to_send = 0;
-        int count = 0;
+        // int count = 0;
+        int iov_count = 0;
+        auto it = conn->outgoing_queue.begin();
 
-        for(const auto& msg_ptr : conn->outgoing_queue)
+        for( ; it != conn->outgoing_queue.end() && iov_count < IOV_LIMIT ; ++it)
         {
-            if(count >= IOV_LIMIT) break;
-            struct iovec v;
+            OutgoingPacket& pkt = *it;
+            size_t off = pkt.sent_offset;
             
-            v.iov_base = (void*)msg_ptr->data();
-            v.iov_len = msg_ptr->size();
-            iov.push_back(v);
-            count++;
+
+            //header
+            if(off < 4)
+            {
+                struct iovec v_header;
+                v_header.iov_base = (char*)&pkt.net_len + off;
+                v_header.iov_len = 4 - off;
+                iov.push_back(v_header);
+                iov_count++;
+            }
+            //payload
+
+            size_t payload_off = (off < 4) ? 0 : (off - 4);
+            if(payload_off < pkt.payload->size())
+            {
+                struct iovec v_payload;
+                v_payload.iov_base = pkt.payload->data() + payload_off;
+                v_payload.iov_len = pkt.payload->size() - payload_off;
+                iov.push_back(v_payload);
+                iov_count++;
+            }
+        }
+
+        if(iov.empty())
+        {
+            conn->outgoing_queue.pop_front();
+            return;
         }
 
         ssize_t n = writev(conn->fd(), iov.data(), iov.size());
@@ -456,27 +516,43 @@ void WebServer::handle_write(ConnPtr conn)
         }
         else
         {
-            size_t bytes_cleared = 0;
-            while(!conn->outgoing_queue.empty())
+            if((size_t) n <= conn->pending_bytes)
             {
-                auto& msg = conn->outgoing_queue.front();
-                if(bytes_cleared + msg->size() <= (size_t)n)
+                conn->pending_bytes -= n;
+            }
+            else
+            {
+                conn->pending_bytes = 0;
+            }
+
+            size_t bytes_sent = n;
+            while(bytes_sent > 0 && !conn->outgoing_queue.empty())
+            {
+                auto& pkt = conn->outgoing_queue.front();
+                size_t pkt_total_size = 4 + pkt.payload->size();
+                size_t remaining_in_pkt = pkt_total_size - pkt.sent_offset;
+
+                if(bytes_sent >= remaining_in_pkt)
                 {
-                    bytes_cleared += msg->size();
+                    bytes_sent -= remaining_in_pkt;
                     conn->outgoing_queue.pop_front();
                 }
                 else
                 {
-                    size_t bytes_sent_from_msg = n - bytes_cleared;
-                    *msg = msg->substr(bytes_sent_from_msg);
+                    pkt.sent_offset += bytes_sent;
                     break;
                 }
             }
         }
     }
 
+    if(conn->is_reading_paused && conn->pending_bytes < LOW_WATER_MARK)
+    {
+        conn->is_reading_paused = false;
+    }
+
     uint32_t final_events = 0;
-    if(!conn->in_buf.full())
+    if(!conn->is_reading_paused && !conn->in_buf.full())
     {
         final_events |= EPOLLIN;
     }
@@ -509,8 +585,9 @@ void WebServer::close_conn(ConnPtr conn)
 
     if(!leave_msg.empty())
     {
-        threadpool_->push_task([this, leave_msg] {
-            this->handle_broadcast_task(nullptr, leave_msg);
+        auto payload = std::make_shared<std::vector<char>>(leave_msg.begin(), leave_msg.end());
+        threadpool_->push_task([this, payload]{
+            this->handle_broadcast_task(nullptr, payload);
         });
     }
 
@@ -565,7 +642,12 @@ void WebServer::handle_pending_writes()
 
             if(!conn->outgoing_queue.empty() && !conn->is_write_armed)
             {
-                mod_fd_epoll(conn->fd(), EPOLLIN | EPOLLOUT);
+                uint32_t events = EPOLLOUT;
+                if(!conn->is_reading_paused && !conn->in_buf.full())
+                {
+                    events |= EPOLLIN;
+                }
+                mod_fd_epoll(conn->fd(), events);
                 conn->is_write_armed = true;
             }
         }

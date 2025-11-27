@@ -29,7 +29,8 @@ private:
 
     //defines the work that workers will do
     void handle_login_task(ConnPtr conn, std::string username);
-    void handle_broadcast_task(ConnPtr sender_conn, std::string message);
+    // void handle_broadcast_task(ConnPtr sender_conn, std::string message);
+    void handle_broadcast_task(ConnPtr sender_conn, std::shared_ptr<std::vector<char>> payload);
 
     int port_;
     int n_workers_;

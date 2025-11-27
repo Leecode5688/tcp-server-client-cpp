@@ -4,6 +4,7 @@
 #include <algorithm>
 #include <cstring>
 #include <cstdint>
+#include <utility>
 
 //simple ring buffer for the main thread (SPSC)
 class RingBuffer {
@@ -41,6 +42,23 @@ public:
         count_ += bytes_to_write;
         return bytes_to_write; 
     }
+
+    std::pair<char*, size_t> get_writeable_buffer()
+    {
+        size_t capacity = buf_.size();
+        size_t free_space = capacity - count_;
+        size_t contiguous_space = std::min(free_space, capacity - write_pos_);
+
+        return {reinterpret_cast<char*>(&buf_[write_pos_]), contiguous_space};
+    }
+
+    void commit_write(size_t len)
+    {
+        write_pos_ = (write_pos_ + len) % buf_.size();
+        count_ += len;
+    }
+
+
     //peek at data without removing (used for checking headers)
     //return bytes actually read to out
     size_t peek(char* out, size_t len) const {

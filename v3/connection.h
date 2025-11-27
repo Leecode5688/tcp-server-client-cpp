@@ -13,6 +13,15 @@ enum class ConnState {
     ACTIVE
 };
 
+struct OutgoingPacket {
+    //4 byte header (network order)
+    uint32_t net_len;
+    //shared payload
+    std::shared_ptr<std::vector<char>> payload;
+    //track partial writes
+    size_t sent_offset = 0;
+};
+
 struct Connection {
     // int fd;
     Socket sock;
@@ -22,7 +31,13 @@ struct Connection {
     RingBuffer in_buf{8192};
     // RingBuffer out_buf{8192};
 
-    std::deque<std::shared_ptr<std::string>> outgoing_queue;
+    // std::deque<std::shared_ptr<std::string>> outgoing_queue;
+    std::deque<OutgoingPacket> outgoing_queue;
+
+    //total bytes (header + payload) waiting to be sent
+    size_t pending_bytes = 0;
+    //is EPOLLIN currently disabled ?
+    bool is_reading_paused = false;
 
     std::mutex mtx;
     std::atomic<bool> closed{false};
