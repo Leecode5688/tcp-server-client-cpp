@@ -15,19 +15,18 @@
 #include <sys/uio.h>
 
 #define BACKLOG 128
-// #define BUFFER_SIZE 4096
 #define MAX_EVENTS 128
 #define MAX_PAYLOAD_SIZE (1024 * 4)
+
 #define WRITE_BUDGET_PER_LOOP 100
 
-//hard limit, if queue has > 10k messages, drop packets
-#define MAX_OUTGOING_QUEUE_SIZE 10000
+//hard limit, if message size exceeds this, drop packets
+#define MAX_OUTGOING_QUEUE_SIZE 5000
 
 //high water mark: stop reading from client if they have this much pending data
-#define HIGH_WATER_MARK (8 * 1024 * 1024)
+#define HIGH_WATER_MARK (256 * 1024)
 //low water mark => resume reading once they drain to this level
-#define LOW_WATER_MARK (4 * 1024 * 1024)
-
+#define LOW_WATER_MARK (128 * 1024)
 
 WebServer::WebServer(int port, int n_workers) : 
     port_(port), n_workers_(n_workers), running_(true)
@@ -50,18 +49,6 @@ OutgoingPacket make_packet(const std::string& msg)
     pkt.payload = std::make_shared<std::vector<char>>(msg.begin(), msg.end());
     pkt.net_len = htonl(pkt.payload->size());
     return pkt;
-}
-
-std::vector<ConnPtr> WebServer::get_active_connections()
-{
-    std::vector<ConnPtr> active_conns;
-    std::shared_lock<std::shared_mutex> lk(conn_map_mtx_);
-    active_conns.reserve(connections_.size());
-    for(const auto& conn_pair : connections_)
-    {
-        active_conns.push_back(conn_pair.second);
-    }
-    return active_conns;
 }
 
 void WebServer::setup_signalfd()
@@ -98,7 +85,6 @@ void WebServer::setup_server_socket()
     int opt = 1;
     if(setsockopt(listen_fd_, SOL_SOCKET, SO_REUSEADDR, &opt, sizeof(opt)))
     {
-        // perror("Setsockopt failed!!");
         LOG_ERROR("Setsockopt failed: " + std::string(strerror(errno)));
         exit(1);
     }
@@ -110,17 +96,13 @@ void WebServer::setup_server_socket()
 
     if(bind(listen_fd_, (sockaddr*)&server_addr, sizeof(server_addr)) < 0)
     {
-        // perror("Bind failed!!");
         LOG_ERROR("Bind failed: " + std::string(strerror(errno)));
-
         exit(1);
     }
 
     if(listen(listen_fd_, BACKLOG) < 0)
     {
-        // perror("Listen failed!!");
         LOG_ERROR("Listen failed: " + std::string(strerror(errno)));
-
         exit(1);
     }
     set_nonblocking(listen_fd_);
@@ -131,9 +113,7 @@ void WebServer::setup_epoll()
     epoll_fd_ = epoll_create1(0);
     if(epoll_fd_ == -1)
     {
-        // perror("epoll_create1");
         LOG_ERROR("epoll_create1: " + std::string(strerror(errno)));
-
         exit(1);
     }
     add_fd_to_epoll(listen_fd_, EPOLLIN);
@@ -146,9 +126,7 @@ void WebServer::setup_eventfd()
     notify_fd_ = eventfd(0, EFD_NONBLOCK | EFD_CLOEXEC);
     if(notify_fd_ == -1)
     {
-        // perror("eventfd");
         LOG_ERROR("eventfd: " + std::string(strerror(errno)));
-
         exit(1);
     }
     add_fd_to_epoll(notify_fd_, EPOLLIN);
@@ -194,9 +172,7 @@ void WebServer::accept_loop()
             if(errno == EAGAIN || errno == EWOULDBLOCK) break;
             else
             {
-                // perror("Accept failed!!");
                 LOG_ERROR("Accept failed: " + std::string(strerror(errno)));
-
                 break;
             }
         }
@@ -208,24 +184,16 @@ void WebServer::accept_loop()
             connections_[client_fd] = conn;
         }
 
-        // add_fd_to_epoll(client_fd, EPOLLIN);
         add_fd_to_epoll(conn->fd(), EPOLLIN);
 
         char ip[INET_ADDRSTRLEN];
         inet_ntop(AF_INET, &client_addr.sin_addr, ip, sizeof(ip));
-        // std::cout<<"Accepted "<<ip<<":"<<ntohs(client_addr.sin_port)
-        //     <<" fd = "<<client_fd<<"\n";
-        
+
         LOG_INFO("Accepted "+ std::string(ip) + ":" + std::to_string(ntohs(client_addr.sin_port))
             + " fd = " + std::to_string(client_fd));
 
         std::string welcomeMessage = "[Server]: Welcome! Please enter your username: ";
-        // auto welcome_pkt = std::make_shared<std::string>(format_message(welcomeMessage));
-        // {
-        //     std::lock_guard<std::mutex> conn_lk(conn->mtx);
-        //     conn->outgoing_queue.push_back(welcome_pkt);
-        // }
-        
+
         OutgoingPacket pkt = make_packet(welcomeMessage);
         {
             std::lock_guard<std::mutex> conn_lk(conn->mtx);
@@ -310,7 +278,6 @@ void WebServer::handle_broadcast_task(ConnPtr sender_conn, std::shared_ptr<std::
         std::string prefix = "[" + sender_conn->username + "]: ";
         final_payload = std::make_shared<std::vector<char>>();
         final_payload->reserve(prefix.size() + payload->size());
-
         final_payload->insert(final_payload->end(), prefix.begin(), prefix.end());
         final_payload->insert(final_payload->end(), payload->begin(), payload->end());
     }
@@ -323,40 +290,40 @@ void WebServer::handle_broadcast_task(ConnPtr sender_conn, std::shared_ptr<std::
     packet.net_len = htonl(final_payload->size());
     packet.payload = final_payload;
 
-    std::vector<ConnPtr> active_conns = get_active_connections();
-
-    for(const auto& conn : active_conns)
     {
-        if(!conn || conn->closed.load() || conn->state != ConnState::ACTIVE)
-        {
-            continue;
-        }
-        if(sender_conn && conn->fd() == sender_conn->fd())
-        {
-            continue;
-        }
+        std::shared_lock<std::shared_mutex> map_lock(conn_map_mtx_);
 
+        for(const auto& pair : connections_)
         {
-            std::lock_guard<std::mutex> conn_lk(conn->mtx);
-            //hard limit check
-            if(conn->outgoing_queue.size() >= MAX_OUTGOING_QUEUE_SIZE)
+            const ConnPtr& conn = pair.second;
+            if(!conn || conn->closed.load() || conn->state != ConnState::ACTIVE)
+            {
+                continue;
+            }
+            if(sender_conn && conn->fd() == sender_conn->fd())
             {
                 continue;
             }
 
-            conn->outgoing_queue.push_back(packet);
-            //add bytes
-            conn->pending_bytes += (4 + final_payload->size());
-
-            //check high water mark
-            if(!conn->is_reading_paused && conn->pending_bytes >= HIGH_WATER_MARK)
             {
-                conn->is_reading_paused = true;
-                mod_fd_epoll(conn->fd(), EPOLLOUT);
-                LOG_INFO("Client " + std::to_string(conn->fd()) + " paused (High Water Mark)");
+                std::lock_guard<std::mutex> conn_lk(conn->mtx);
+               
+                //hard limit check to prevent slow clients from overwhelming server memory
+                if(conn->outgoing_queue.size() >= MAX_OUTGOING_QUEUE_SIZE) continue;
+
+                conn->outgoing_queue.push_back(packet);
+                conn->pending_bytes += (4 + final_payload->size());
+
+                //flow control, pause reading if writing is too slow
+                if(!conn->is_reading_paused && conn->pending_bytes >= HIGH_WATER_MARK)
+                {
+                    conn->is_reading_paused = true;
+                    mod_fd_epoll(conn->fd(), EPOLLOUT);
+                }
             }
+
+            mark_fd_for_writing(conn);
         }
-        mark_fd_for_writing(conn);
     }
 
     uint64_t one = 1;
@@ -366,208 +333,226 @@ void WebServer::handle_broadcast_task(ConnPtr sender_conn, std::shared_ptr<std::
 
 void WebServer::handle_read(ConnPtr conn)
 {
-    // char buffer[BUFFER_SIZE] = {0};
-    while(true)
+    bool should_close = false;
     {
-        
         std::lock_guard<std::mutex> lk(conn->mtx);
 
-        auto [buf_ptr, buf_len] = conn->in_buf.get_writeable_buffer();
-
-        if(buf_len == 0)
+        while(true)
         {
-            uint32_t events = 0;
-            if(!conn->outgoing_queue.empty()) events |= EPOLLOUT;  
-            mod_fd_epoll(conn->fd(), events);
-            return;
-        }
+            //scatter read, get iovecs to read directly into ring buffer
+            auto iovecs = conn->in_buf.get_writeable_iovecs();
 
-        ssize_t n = recv(conn->fd(), buf_ptr, buf_len, 0);
-
-        if(n > 0)
-        {   
-            conn->in_buf.commit_write(n);
-            
-            while(true)
+            if(iovecs.empty())
             {
-                //do we have 4-byte header now?
-                if(conn->in_buf.size() < sizeof(uint32_t))
-                {
-                    break;
-                }
+                //buffer full, apply backpressure, stop listening for reads
+                uint32_t events = 0;
+                if(!conn->outgoing_queue.empty()) events |= EPOLLOUT;
+                mod_fd_epoll(conn->fd(), events);
+                return;
+            }
 
-                //if yes, read the header 
+            //read directly into ring buffer in one syscall
+            ssize_t n = readv(conn->fd(), iovecs.data(), iovecs.size());
 
-                char header[4];
-                conn->in_buf.peek(header, 4);
-
-                uint32_t net_len;
-                // memcpy(&net_len, conn->in_buf.data(), sizeof(uint32_t));
-                memcpy(&net_len, header, sizeof(uint32_t));
-
-                uint32_t payload_len = ntohl(net_len);
+            if(n > 0)
+            {   
+                conn->in_buf.commit_write(n);
                 
-                if(payload_len > MAX_PAYLOAD_SIZE)
+                while(true)
                 {
-                    std::cout<<"Client "<<conn->fd()<<" sent invalid payload size: "<<payload_len<<std::endl;
-                    close_conn(conn);
-                    return;
-                }
+                    //do we have 4-byte header now?
+                    if(conn->in_buf.size() < sizeof(uint32_t))
+                    {
+                        break;
+                    }
 
-                //Do we have ful header + payyload?
-                if(conn->in_buf.size() < (sizeof(uint32_t) + payload_len))
-                {
-                    break;
-                }
+                    //if yes, read the header 
 
-                conn->in_buf.consume(sizeof(uint32_t));
-                
-                auto payload_ptr = std::make_shared<std::vector<char>>(payload_len);
+                    char header[4];
+                    conn->in_buf.peek(header, 4);
 
-                conn->in_buf.peek(payload_ptr->data(), payload_len);
-                conn->in_buf.consume(payload_len);
+                    uint32_t net_len;
+                    memcpy(&net_len, header, sizeof(uint32_t));
 
-                if(conn->state == ConnState::AWAITING_USERNAME)
-                {
-                    std::string username(payload_ptr->begin(), payload_ptr->end());
-                    threadpool_->push_task([this, conn, username]{
-                        this->handle_login_task(conn, username);
-                    });
-                }
-                else if(conn->state == ConnState::ACTIVE)
-                {
-                    threadpool_->push_task([this, conn, payload_ptr]{
-                        this->handle_broadcast_task(conn, payload_ptr);
-                    });
+                    uint32_t payload_len = ntohl(net_len);
+                    
+                    //check for invalid payload size
+                    if(payload_len > MAX_PAYLOAD_SIZE)
+                    {
+                        std::cout<<"Client "<<conn->fd()<<" sent invalid payload size: "<<payload_len<<std::endl;
+                        close_conn(conn);
+                        return;
+                    }
+
+                    //Do we have ful header + payyload?
+                    if(conn->in_buf.size() < (sizeof(uint32_t) + payload_len))
+                    {
+                        break;
+                    }
+
+                    conn->in_buf.consume(sizeof(uint32_t));
+                    
+                    auto payload_ptr = std::make_shared<std::vector<char>>(payload_len);
+
+                    conn->in_buf.peek(payload_ptr->data(), payload_len);
+                    conn->in_buf.consume(payload_len);
+
+                    if(conn->state == ConnState::AWAITING_USERNAME)
+                    {
+                        std::string username(payload_ptr->begin(), payload_ptr->end());
+                        threadpool_->push_task([this, conn, username]{
+                            this->handle_login_task(conn, username);
+                        });
+                    }
+                    else if(conn->state == ConnState::ACTIVE)
+                    {
+                        threadpool_->push_task([this, conn, payload_ptr]{
+                            this->handle_broadcast_task(conn, payload_ptr);
+                        });
+                    }
                 }
             }
-        }
-        else if(n == 0)
-        {
-            close_conn(conn);
-            return;
-        }
-        else
-        {
-            if(errno == EAGAIN || errno == EWOULDBLOCK) break;
+            else if(n == 0)
+            {
+                close_conn(conn);
+                return;
+            }
+            else
+            {
+                if(errno == EAGAIN || errno == EWOULDBLOCK) break;
 
-            close_conn(conn);
-            return;
+                close_conn(conn);
+                return;
+            }
         }
+    }
+    if(should_close)
+    {
+        close_conn(conn);
     }
 }
 
 void WebServer::handle_write(ConnPtr conn)
 {
-    std::lock_guard<std::mutex> lk(conn->mtx);
-
-    if(!conn->outgoing_queue.empty())
+    bool should_close = false;
     {
-        std::vector<struct iovec> iov;
-        const int IOV_LIMIT = 64;
-        // size_t bytes_to_send = 0;
-        // int count = 0;
-        int iov_count = 0;
-        auto it = conn->outgoing_queue.begin();
 
-        for( ; it != conn->outgoing_queue.end() && iov_count < IOV_LIMIT ; ++it)
+        std::lock_guard<std::mutex> lk(conn->mtx);
+
+        if(!conn->outgoing_queue.empty())
         {
-            OutgoingPacket& pkt = *it;
-            size_t off = pkt.sent_offset;
-            
+            std::vector<struct iovec> iov;
+            const int IOV_LIMIT = 64;
+            int iov_count = 0;
+            auto it = conn->outgoing_queue.begin();
 
-            //header
-            if(off < 4)
+            for( ; it != conn->outgoing_queue.end() && iov_count < IOV_LIMIT ; ++it)
             {
-                struct iovec v_header;
-                v_header.iov_base = (char*)&pkt.net_len + off;
-                v_header.iov_len = 4 - off;
-                iov.push_back(v_header);
-                iov_count++;
+                OutgoingPacket& pkt = *it;
+                size_t off = pkt.sent_offset;
+                
+                //header
+                if(off < 4)
+                {
+                    struct iovec v_header;
+                    v_header.iov_base = (char*)&pkt.net_len + off;
+                    v_header.iov_len = 4 - off;
+                    iov.push_back(v_header);
+                    iov_count++;
+                }
+                //payload
+
+                size_t payload_off = (off < 4) ? 0 : (off - 4);
+                if(payload_off < pkt.payload->size())
+                {
+                    struct iovec v_payload;
+                    v_payload.iov_base = pkt.payload->data() + payload_off;
+                    v_payload.iov_len = pkt.payload->size() - payload_off;
+                    iov.push_back(v_payload);
+                    iov_count++;
+                }
             }
-            //payload
 
-            size_t payload_off = (off < 4) ? 0 : (off - 4);
-            if(payload_off < pkt.payload->size())
+            if(iov.empty())
             {
-                struct iovec v_payload;
-                v_payload.iov_base = pkt.payload->data() + payload_off;
-                v_payload.iov_len = pkt.payload->size() - payload_off;
-                iov.push_back(v_payload);
-                iov_count++;
-            }
-        }
-
-        if(iov.empty())
-        {
-            conn->outgoing_queue.pop_front();
-            return;
-        }
-
-        ssize_t n = writev(conn->fd(), iov.data(), iov.size());
-
-        if(n < 0)
-        {
-            if(errno != EAGAIN && errno != EWOULDBLOCK)
-            {
-                close_conn(conn);
+                conn->outgoing_queue.pop_front();
                 return;
             }
-        }
-        else
-        {
-            if((size_t) n <= conn->pending_bytes)
+
+            //hather write: send multiple buffers in one syscall
+            ssize_t n = writev(conn->fd(), iov.data(), iov.size());
+
+            if(n < 0)
             {
-                conn->pending_bytes -= n;
+                if(errno != EAGAIN && errno != EWOULDBLOCK)
+                {
+                    close_conn(conn);
+                    return;
+                }
             }
             else
             {
-                conn->pending_bytes = 0;
-            }
-
-            size_t bytes_sent = n;
-            while(bytes_sent > 0 && !conn->outgoing_queue.empty())
-            {
-                auto& pkt = conn->outgoing_queue.front();
-                size_t pkt_total_size = 4 + pkt.payload->size();
-                size_t remaining_in_pkt = pkt_total_size - pkt.sent_offset;
-
-                if(bytes_sent >= remaining_in_pkt)
+                if((size_t) n <= conn->pending_bytes)
                 {
-                    bytes_sent -= remaining_in_pkt;
-                    conn->outgoing_queue.pop_front();
+                    conn->pending_bytes -= n;
                 }
                 else
                 {
-                    pkt.sent_offset += bytes_sent;
-                    break;
+                    conn->pending_bytes = 0;
+                }
+
+                size_t bytes_sent = n;
+                while(bytes_sent > 0 && !conn->outgoing_queue.empty())
+                {
+                    auto& pkt = conn->outgoing_queue.front();
+                    size_t pkt_total_size = 4 + pkt.payload->size();
+                    size_t remaining_in_pkt = pkt_total_size - pkt.sent_offset;
+
+                    if(bytes_sent >= remaining_in_pkt)
+                    {
+                        bytes_sent -= remaining_in_pkt;
+                        conn->outgoing_queue.pop_front();
+                    }
+                    else
+                    {
+                        pkt.sent_offset += bytes_sent;
+                        break;
+                    }
                 }
             }
         }
+
+        if(conn->is_reading_paused && conn->pending_bytes < LOW_WATER_MARK)
+        {
+            conn->is_reading_paused = false;
+        }
+
+        uint32_t final_events = 0;
+        if(!conn->is_reading_paused && !conn->in_buf.full())
+        {
+            final_events |= EPOLLIN;
+        }
+        
+        if(!conn->outgoing_queue.empty())
+        {
+            final_events |= EPOLLOUT;
+            conn->is_write_armed = true;
+        }
+        else
+        {
+            conn->is_write_armed = false;
+        }
+
+        if(!should_close)
+        {
+            mod_fd_epoll(conn->fd(), final_events);
+        }
     }
 
-    if(conn->is_reading_paused && conn->pending_bytes < LOW_WATER_MARK)
+    if(should_close)
     {
-        conn->is_reading_paused = false;
+        close_conn(conn);
     }
-
-    uint32_t final_events = 0;
-    if(!conn->is_reading_paused && !conn->in_buf.full())
-    {
-        final_events |= EPOLLIN;
-    }
-    
-    if(!conn->outgoing_queue.empty())
-    {
-        final_events |= EPOLLOUT;
-        conn->is_write_armed = true;
-    }
-    else
-    {
-        conn->is_write_armed = false;
-    }
-
-    mod_fd_epoll(conn->fd(), final_events);
 }
 
 void WebServer::close_conn(ConnPtr conn)
@@ -598,12 +583,13 @@ void WebServer::close_conn(ConnPtr conn)
         std::unique_lock<std::shared_mutex> lk(conn_map_mtx_);
         connections_.erase(conn->fd());
     }
-    // std::cout<<"Closed fd = "<<conn->fd<<"\n";
     LOG_INFO("Closed fd = " + std::to_string(conn->fd()));
 }
 
 void WebServer::mark_fd_for_writing(const ConnPtr& conn)
 {
+    //called by worker threads
+    //acquires lock B (conn->mtx) then lock A (ready_to_write_mtx_)
     std::lock_guard<std::mutex> conn_lk(conn->mtx);
     if(!conn->needs_processing)
     {
@@ -615,15 +601,21 @@ void WebServer::mark_fd_for_writing(const ConnPtr& conn)
 
 void WebServer::handle_pending_writes()
 {
+    std::queue<int> local_queue;
+
+    {
+        std::lock_guard<std::mutex> lk(ready_to_write_mtx_);
+        local_queue.swap(ready_to_write_fd_queue_);
+    }
+
     int clients_processed = 0;
     std::shared_lock<std::shared_mutex> map_lk(conn_map_mtx_);
     //lock global queue, process our micro-batch
-    std::lock_guard<std::mutex> lk(ready_to_write_mtx_);
     
-    while(!ready_to_write_fd_queue_.empty() && clients_processed < WRITE_BUDGET_PER_LOOP)
+    while(!local_queue.empty() && clients_processed < WRITE_BUDGET_PER_LOOP)
     {
-        int fd = ready_to_write_fd_queue_.front();
-        ready_to_write_fd_queue_.pop();
+        int fd = local_queue.front();
+        local_queue.pop();
         clients_processed++;
 
         auto it = connections_.find(fd);
@@ -637,6 +629,7 @@ void WebServer::handle_pending_writes()
         }
 
         {
+            //lock the connection (lock B)
             std::lock_guard<std::mutex> conn_lk(conn->mtx);
             conn->needs_processing = false;
 
@@ -651,7 +644,16 @@ void WebServer::handle_pending_writes()
                 conn->is_write_armed = true;
             }
         }
-        
+    }
+
+    if(!local_queue.empty())
+    {
+        std::lock_guard<std::mutex> lk(ready_to_write_mtx_);
+        while(!local_queue.empty())
+        {
+            ready_to_write_fd_queue_.push(local_queue.front());
+            local_queue.pop();
+        }
     }
 }
 
@@ -667,8 +669,6 @@ void WebServer::run()
         if(nfds == -1)
         {
             if(errno == EINTR) continue;
-
-            // perror("epoll_wait");
             LOG_ERROR("epoll_wait failed: " + std::string(strerror(errno)));
             break;
         }
@@ -686,7 +686,6 @@ void WebServer::run()
             {
                 struct signalfd_siginfo si;
                 read(sig_fd_, &si, sizeof(si));
-                // std::cout<<"Signal received, shutting down...\n";
                 LOG_INFO("Signal received, shutting down...");
                 running_ = false;
                 break;
@@ -749,10 +748,6 @@ void WebServer::stop()
 
     {
         std::unique_lock<std::shared_mutex> lk(conn_map_mtx_);
-        // for(auto& c : connections_)
-        // {
-        //     ::close(c.first);
-        // }
         connections_.clear();
     }
 

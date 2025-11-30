@@ -5,6 +5,7 @@
 #include <cstring>
 #include <cstdint>
 #include <utility>
+#include <sys/uio.h>
 
 //simple ring buffer for the main thread (SPSC)
 class RingBuffer {
@@ -43,13 +44,33 @@ public:
         return bytes_to_write; 
     }
 
-    std::pair<char*, size_t> get_writeable_buffer()
+    std::vector<struct iovec> get_writeable_iovecs()
     {
         size_t capacity = buf_.size();
         size_t free_space = capacity - count_;
-        size_t contiguous_space = std::min(free_space, capacity - write_pos_);
 
-        return {reinterpret_cast<char*>(&buf_[write_pos_]), contiguous_space};
+        if(free_space == 0) return {};
+
+        std::vector<struct iovec> iovecs;
+
+        size_t contiguous_to_end = capacity - write_pos_;
+        size_t len1 = std::min(free_space, contiguous_to_end);
+
+        iovec iov1;
+        iov1.iov_base = reinterpret_cast<void*>(&buf_[write_pos_]);
+        iov1.iov_len = len1;
+        iovecs.push_back(iov1);
+
+        if(len1 < free_space)
+        {
+            size_t len2 = free_space - len1;
+            iovec iov2;
+            iov2.iov_base = reinterpret_cast<void*>(&buf_[0]);
+            iov2.iov_len = len2;
+            iovecs.push_back(iov2);
+        }
+
+        return iovecs;
     }
 
     void commit_write(size_t len)

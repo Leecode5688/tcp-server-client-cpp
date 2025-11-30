@@ -29,13 +29,17 @@ void ThreadPool::push_task(std::function<void()> task)
         std::lock_guard<std::mutex> lk(queue_mtx_);
         task_queue_.emplace(std::move(task));
     }
+    //wake up one worker thread to handle the new task
     queue_cv_.notify_one();
 }
 
 void ThreadPool::shutdown()
 {
     bool expected = true;
+    //atomic compare exchange to ensure shutdown logic runs only once
     if(!running_.compare_exchange_strong(expected, false)) return;
+
+    //wake up all worker threads to exit their loops
     queue_cv_.notify_all();
     for(auto& worker : workers_)
     {

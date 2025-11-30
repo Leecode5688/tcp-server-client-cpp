@@ -9,6 +9,7 @@
 #include <mutex>
 #include <queue>
 
+//batch size for processing writes to avoid starving the read loop
 #define WRITE_BUDGET_PER_LOOP 100
 
 class WebServer{
@@ -21,15 +22,17 @@ private:
     static void set_nonblocking(int fd);
     void add_fd_to_epoll(int fd, uint32_t events);
 
+    //core reactor functions, run in main thread
     void accept_loop();
     void handle_read(ConnPtr conn);
     void handle_write(ConnPtr conn);
     void close_conn(ConnPtr conn);
+
+    //handles the global write queue
     void handle_pending_writes();
 
-    //defines the work that workers will do
+    //worker tasks
     void handle_login_task(ConnPtr conn, std::string username);
-    // void handle_broadcast_task(ConnPtr sender_conn, std::string message);
     void handle_broadcast_task(ConnPtr sender_conn, std::shared_ptr<std::vector<char>> payload);
 
     int port_;
@@ -41,11 +44,19 @@ private:
     int notify_fd_{-1};
     
     std::unique_ptr<ThreadPool> threadpool_;
+
+    //map lock, protects the connections_ map 
+    //use shared locks for lookkups and iteration, unique locks for adding and removing clients
     std::unordered_map<int, ConnPtr> connections_;
-    std::unordered_set<std::string> usernames_;
     std::shared_mutex conn_map_mtx_;
+
+    //username lock
+    //protects the set of active usernames
+    std::unordered_set<std::string> usernames_;
     std::shared_mutex usernames_mtx_;
     
+    //global write queue lock
+    //protects the queue of fds ready to write
     std::queue<int> ready_to_write_fd_queue_;
     std::mutex ready_to_write_mtx_;
 
@@ -57,7 +68,7 @@ public:
     void mod_fd_epoll(int fd, uint32_t events);
     std::vector<ConnPtr> get_active_connections();
 
-    // void mark_fd_for_writing(int fd);
+    //called by worker threads to signal that a client has data to send
     void mark_fd_for_writing(const ConnPtr& conn);
 
     void run();
