@@ -5,6 +5,7 @@
 #include <memory>
 #include <queue>
 #include <deque>
+#include <chrono>
 #include "ringbuffer.h"
 #include "utils.h"
 
@@ -55,8 +56,18 @@ struct Connection {
     //true if currently in the processing queue
     bool needs_processing{false};
 
-    //
-    explicit Connection(int fd_) : sock(fd_) {}
+    //optimization: idle timeout tracking
+    std::chrono::steady_clock::time_point last_activity;
+
+    explicit Connection(int fd_) : sock(fd_) {
+        update_activity();
+    }
+
+    void update_activity()
+    {
+        last_activity = std::chrono::steady_clock::now();
+    }
+
     int fd() const { return sock.get();}
 };
 

@@ -18,8 +18,11 @@ private:
     void setup_server_socket();
     void setup_epoll();
     void setup_eventfd();
+    void setup_timerfd();
 
     static void set_nonblocking(int fd);
+    static void set_tcp_nodelay(int fd);
+
     void add_fd_to_epoll(int fd, uint32_t events);
 
     //core reactor functions, run in main thread
@@ -28,9 +31,10 @@ private:
     void handle_write(ConnPtr conn);
     void close_conn(ConnPtr conn);
 
+    void check_timeouts();
+
     //handles the global write queue
     void handle_pending_writes();
-
     //worker tasks
     void handle_login_task(ConnPtr conn, std::string username);
     void handle_broadcast_task(ConnPtr sender_conn, std::shared_ptr<std::vector<char>> payload);
@@ -43,6 +47,8 @@ private:
     int sig_fd_{-1};
     int notify_fd_{-1};
     
+    int timer_fd_{-1};
+
     std::unique_ptr<ThreadPool> threadpool_;
 
     //map lock, protects the connections_ map 

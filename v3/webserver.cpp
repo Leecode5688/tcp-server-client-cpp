@@ -1,5 +1,6 @@
 #include "webserver.h"
 #include "utils.h"
+#include "metrics.h"
 #include <iostream>
 #include <cstring>
 #include <csignal>
@@ -9,9 +10,11 @@
 #include <sys/epoll.h>
 #include <sys/socket.h>
 #include <netinet/in.h>
+#include <netinet/tcp.h>
 #include <arpa/inet.h>
 #include <sys/signalfd.h>
 #include <sys/eventfd.h>
+#include <sys/timerfd.h>
 #include <sys/uio.h>
 
 #define BACKLOG 128
@@ -27,6 +30,32 @@
 #define HIGH_WATER_MARK (256 * 1024)
 //low water mark => resume reading once they drain to this level
 #define LOW_WATER_MARK (128 * 1024)
+//10 minute timeout
+#define CONNECTION_TIMEOUT_SEC 600
+
+void WebServer::setup_timerfd()
+{
+    timer_fd_ = timerfd_create(CLOCK_MONOTONIC, TFD_NONBLOCK | TFD_CLOEXEC);
+    if(timer_fd_ == -1)
+    {
+        LOG_ERROR("timerfd_create: " + std::string(strerror(errno)));
+        exit(1);
+    }
+
+    struct itimerspec ts;
+    ts.it_value.tv_sec = 60;
+    ts.it_value.tv_nsec = 0;
+    ts.it_interval.tv_sec = 60;
+    ts.it_interval.tv_nsec = 0;
+
+    if(timerfd_settime(timer_fd_, 0, &ts, nullptr) == -1)
+    {
+        LOG_ERROR("timerfd_settime: " + std::string(strerror(errno)));
+        exit(1);
+    }
+
+    add_fd_to_epoll(timer_fd_, EPOLLIN);
+}
 
 WebServer::WebServer(int port, int n_workers) : 
     port_(port), n_workers_(n_workers), running_(true)
@@ -35,7 +64,7 @@ WebServer::WebServer(int port, int n_workers) :
     setup_server_socket();
     setup_epoll();
     setup_eventfd();
-
+    setup_timerfd();
     threadpool_ = std::make_unique<ThreadPool>(n_workers, notify_fd_);
 }
 
@@ -74,12 +103,22 @@ void WebServer::setup_signalfd()
     }
 }
 
+void WebServer::set_tcp_nodelay(int fd)
+{
+    int opt = 1;
+    if(setsockopt(fd, IPPROTO_TCP, TCP_NODELAY, &opt, sizeof(opt)) < 0)
+    {
+        LOG_ERROR("setsocket TCP_NODELAY failed");
+    }
+}
+
 void WebServer::setup_server_socket()
 {
     listen_fd_ = socket(AF_INET, SOCK_STREAM, 0);
     if(listen_fd_ < 0)
     {
-        LOG_ERROR("Socket creation failed: " + std::string(strerror(errno)));        exit(1);
+        LOG_ERROR("Socket creation failed: " + std::string(strerror(errno)));        
+        exit(1);
     }
 
     int opt = 1;
@@ -178,6 +217,8 @@ void WebServer::accept_loop()
         }
 
         set_nonblocking(client_fd);
+        set_tcp_nodelay(client_fd);
+
         ConnPtr conn = std::make_shared<Connection>(client_fd);
         {
             std::lock_guard<std::shared_mutex> lk(conn_map_mtx_);
@@ -185,6 +226,7 @@ void WebServer::accept_loop()
         }
 
         add_fd_to_epoll(conn->fd(), EPOLLIN);
+        METRICS.on_connection_accepted();
 
         char ip[INET_ADDRSTRLEN];
         inet_ntop(AF_INET, &client_addr.sin_addr, ip, sizeof(ip));
@@ -246,7 +288,6 @@ void WebServer::handle_login_task(ConnPtr conn, std::string username)
     {
         std::lock_guard<std::mutex> conn_lk(conn->mtx);
         conn->outgoing_queue.push_back(pkt);
-
         conn->pending_bytes += (4 + pkt.payload->size());
     }
 
@@ -272,7 +313,6 @@ void WebServer::handle_login_task(ConnPtr conn, std::string username)
 void WebServer::handle_broadcast_task(ConnPtr sender_conn, std::shared_ptr<std::vector<char>> payload)
 {
     std::shared_ptr<std::vector<char>> final_payload;
-
     if(sender_conn)
     {
         std::string prefix = "[" + sender_conn->username + "]: ";
@@ -290,39 +330,65 @@ void WebServer::handle_broadcast_task(ConnPtr sender_conn, std::shared_ptr<std::
     packet.net_len = htonl(final_payload->size());
     packet.payload = final_payload;
 
+
+    //snapshot, copy pointers to local vector
+    std::vector<ConnPtr> active_conns;
     {
         std::shared_lock<std::shared_mutex> map_lock(conn_map_mtx_);
-
+        active_conns.reserve(connections_.size());
         for(const auto& pair : connections_)
         {
-            const ConnPtr& conn = pair.second;
-            if(!conn || conn->closed.load() || conn->state != ConnState::ACTIVE)
+            active_conns.push_back(pair.second);
+        }
+    }
+
+    //local batch for wakeup    
+    std::vector<int> fds_to_wake;
+    fds_to_wake.reserve(active_conns.size());
+
+    for(const auto& conn : active_conns)
+    {
+        if(!conn || conn->closed.load() || conn->state != ConnState::ACTIVE) continue;
+        if(sender_conn && conn->fd() == sender_conn->fd()) continue;
+
+        bool wake_this_conn = false;
+        {
+            std::lock_guard<std::mutex> conn_lk(conn->mtx);
+            if(conn->outgoing_queue.size() >= MAX_OUTGOING_QUEUE_SIZE)
             {
+                METRICS.on_message_dropped();
                 continue;
             }
-            if(sender_conn && conn->fd() == sender_conn->fd())
+
+            conn->outgoing_queue.push_back(packet);
+            conn->pending_bytes += (4 + final_payload->size());
+
+            if(!conn->is_reading_paused && conn->pending_bytes >= HIGH_WATER_MARK)
             {
-                continue;
+                conn->is_reading_paused = true;
+                mod_fd_epoll(conn->fd(), EPOLLOUT);
             }
 
+            if(!conn->needs_processing)
             {
-                std::lock_guard<std::mutex> conn_lk(conn->mtx);
-               
-                //hard limit check to prevent slow clients from overwhelming server memory
-                if(conn->outgoing_queue.size() >= MAX_OUTGOING_QUEUE_SIZE) continue;
-
-                conn->outgoing_queue.push_back(packet);
-                conn->pending_bytes += (4 + final_payload->size());
-
-                //flow control, pause reading if writing is too slow
-                if(!conn->is_reading_paused && conn->pending_bytes >= HIGH_WATER_MARK)
-                {
-                    conn->is_reading_paused = true;
-                    mod_fd_epoll(conn->fd(), EPOLLOUT);
-                }
+                conn->needs_processing = true;
+                wake_this_conn = true;
             }
+        }
 
-            mark_fd_for_writing(conn);
+        if(wake_this_conn)
+        {
+            fds_to_wake.push_back(conn->fd());
+        }
+    }
+
+    //batch lock acquisition
+    if(!fds_to_wake.empty())
+    {
+        std::lock_guard<std::mutex> lk(ready_to_write_mtx_);
+        for(int fd : fds_to_wake)
+        {
+            ready_to_write_fd_queue_.push(fd);
         }
     }
 
@@ -336,6 +402,7 @@ void WebServer::handle_read(ConnPtr conn)
     bool should_close = false;
     {
         std::lock_guard<std::mutex> lk(conn->mtx);
+        conn->update_activity();
 
         while(true)
         {
@@ -397,6 +464,8 @@ void WebServer::handle_read(ConnPtr conn)
                     conn->in_buf.peek(payload_ptr->data(), payload_len);
                     conn->in_buf.consume(payload_len);
 
+                    METRICS.on_message_received(payload_len);
+
                     if(conn->state == ConnState::AWAITING_USERNAME)
                     {
                         std::string username(payload_ptr->begin(), payload_ptr->end());
@@ -414,15 +483,17 @@ void WebServer::handle_read(ConnPtr conn)
             }
             else if(n == 0)
             {
-                close_conn(conn);
-                return;
+                // close_conn(conn);
+                should_close = true;
+                break;
             }
             else
             {
                 if(errno == EAGAIN || errno == EWOULDBLOCK) break;
 
-                close_conn(conn);
-                return;
+                // close_conn(conn);
+                should_close = true;
+                break;
             }
         }
     }
@@ -438,6 +509,7 @@ void WebServer::handle_write(ConnPtr conn)
     {
 
         std::lock_guard<std::mutex> lk(conn->mtx);
+        conn->update_activity();
 
         if(!conn->outgoing_queue.empty())
         {
@@ -486,8 +558,9 @@ void WebServer::handle_write(ConnPtr conn)
             {
                 if(errno != EAGAIN && errno != EWOULDBLOCK)
                 {
-                    close_conn(conn);
-                    return;
+                    // close_conn(conn);
+                    // return;
+                    should_close = true;
                 }
             }
             else
@@ -501,7 +574,9 @@ void WebServer::handle_write(ConnPtr conn)
                     conn->pending_bytes = 0;
                 }
 
+                METRICS.on_bytes_sent(n);
                 size_t bytes_sent = n;
+
                 while(bytes_sent > 0 && !conn->outgoing_queue.empty())
                 {
                     auto& pkt = conn->outgoing_queue.front();
@@ -512,6 +587,7 @@ void WebServer::handle_write(ConnPtr conn)
                     {
                         bytes_sent -= remaining_in_pkt;
                         conn->outgoing_queue.pop_front();
+                        METRICS.on_message_sent_count();
                     }
                     else
                     {
@@ -558,6 +634,9 @@ void WebServer::handle_write(ConnPtr conn)
 void WebServer::close_conn(ConnPtr conn)
 {
     if(conn->closed.exchange(true)) return;
+
+    METRICS.on_connection_closed();
+
     std::string leave_msg;
 
     if(!conn->username.empty())
@@ -657,6 +736,29 @@ void WebServer::handle_pending_writes()
     }
 }
 
+//idle sweeper
+void WebServer::check_timeouts()
+{
+    auto now = std::chrono::steady_clock::now();
+    std::vector<ConnPtr> timed_out;
+    {
+        std::shared_lock<std::shared_mutex> lk(conn_map_mtx_);
+        for(auto& pair : connections_)
+        {
+            auto diff = now - pair.second->last_activity;
+            if(std::chrono::duration_cast<std::chrono::seconds>(diff).count() > CONNECTION_TIMEOUT_SEC)
+            {
+                timed_out.push_back(pair.second);
+            }
+        }
+    }
+
+    for(auto& conn : timed_out)
+    {
+        METRICS.on_timeout();
+        close_conn(conn);
+    }
+}
 
 void WebServer::run()
 {
@@ -665,6 +767,7 @@ void WebServer::run()
 
     while(running_)
     {
+        //wait 1000ms max to allow periodic tasks
         int nfds = epoll_wait(epoll_fd_, events, MAX_EVENTS, -1);
         if(nfds == -1)
         {
@@ -681,6 +784,14 @@ void WebServer::run()
             if(fd == listen_fd_)
             {
                 accept_loop();
+            }
+            else if(fd == timer_fd_)
+            {
+                uint64_t expirations;
+                read(timer_fd_, &expirations, sizeof(expirations));
+
+                check_timeouts();
+                METRICS.print_stats();
             }
             else if(fd == sig_fd_)
             {
@@ -766,6 +877,10 @@ void WebServer::stop()
     if(notify_fd_ >= 0)
     {
         close(notify_fd_);
+    }
+    if(timer_fd_ >= 0)
+    {
+        close(timer_fd_);
     }
     LOG_INFO("Server stopped and resources cleaned up!");
 }
