@@ -6,8 +6,11 @@
 #include <queue>
 #include <deque>
 #include <chrono>
+#include <netinet/in.h>
+
 #include "ringbuffer.h"
 #include "utils.h"
+
 
 enum class ConnState {
     AWAITING_USERNAME,
@@ -25,7 +28,7 @@ struct OutgoingPacket {
 };
 
 struct Connection {
-    // int fd;
+    //wrapper around raw fd 
     Socket sock;
     std::string username;
     ConnState state = ConnState::AWAITING_USERNAME;
@@ -49,6 +52,9 @@ struct Connection {
 
     //atomic flag to ensure we only close the connection once
     std::atomic<bool> closed{false};
+
+    //epoll state tracking
+    uint32_t current_epoll_events{0};
 
     //optimization flags to avoid unnecessary epoll_mod calls
     //true if EPOLLOUT is currently set

@@ -48,10 +48,14 @@ public:
         bytes_sent_.fetch_add(n, std::memory_order_relaxed);
     }
 
-    void on_message_received(size_t bytes)
+    void on_bytes_received(size_t n)
+    {
+        bytes_received_.fetch_add(n, std::memory_order_relaxed);
+    }
+
+    void on_message_received()
     {
         messages_received_.fetch_add(1, std::memory_order_relaxed);
-        bytes_received_.fetch_add(bytes, std::memory_order_relaxed);
     }
 
     void on_timeout()

@@ -57,6 +57,16 @@ const char* get_server_ip()
     return ip ? ip : "127.0.0.1";
 }
 
+void discard_loop(int fd)
+{
+    char buffer[BUFFER_SIZE];
+    while(true)
+    {
+        ssize_t n = recv(fd, buffer, sizeof(buffer), 0);
+        if(n <= 0) break;
+    }
+}
+
 int main(int argc, char** argv)
 {
     if(argc != 2)
@@ -125,6 +135,9 @@ int main(int argc, char** argv)
         return 1;
     }
 
+    std::thread render(discard_loop, sock_fd);
+    render.detach();
+
     std::string spam_message = format_message("Hello from bot " + username + "!!");
 
     while(true)
@@ -135,7 +148,7 @@ int main(int argc, char** argv)
             break;
         }
 
-        std::this_thread::sleep_for(std::chrono::milliseconds(1000));
+        std::this_thread::sleep_for(std::chrono::milliseconds(100));
     }
 
     close(sock_fd);

@@ -1,6 +1,6 @@
 #!/bin/bash
 
-NUM_CLIENTS=1000
+NUM_CLIENTS=30
 
 echo "Starting $NUM_CLIENTS bot clients"
 

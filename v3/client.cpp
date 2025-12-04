@@ -2,7 +2,6 @@
 #include <sys/signalfd.h>
 #include <sys/socket.h>
 #include <arpa/inet.h>
-#include <sys/epoll.h>
 #include <unistd.h>
 #include <fcntl.h>
 #include <cstdlib>
@@ -10,9 +9,9 @@
 #include <iostream>
 #include <cstring>
 #include <netdb.h>
+#include <poll.h>
 
 #define BUFFER_SIZE 4096
-#define MAX_EVENTS 2
 
 struct termios Client::orig_termios_;
 
@@ -24,43 +23,47 @@ Client::Client(const std::string& ip, int port) : server_ip_(ip), port_(port)
 
 Client::~Client() 
 {
-    if(sock_fd_ != -1) close(sock_fd_);
-    if(epoll_fd_ != -1) close(epoll_fd_);
-    if(sig_fd_ != -1) close(sig_fd_);
+    stop();
+    
+    if(sock_fd_ != -1) 
+    {
+        close(sock_fd_);
+        sock_fd_ = -1;
+    }
+    if(sig_fd_ != -1)
+    {
+        close(sig_fd_);
+        sig_fd_ = -1;
+    }
 }
 
 bool Client::connect_to_server() 
 {
-    sock_fd_ = socket(AF_INET, SOCK_STREAM, 0);
-    if(sock_fd_ < 0)
-    {
-        perror("Socket creation failed!!");
-        return false;
-    }
-
-    // sockaddr_in server_addr{};
-    // server_addr.sin_family = AF_INET;
-    // server_addr.sin_port = htons(port_);
     struct addrinfo hints{}, *res;
     hints.ai_family = AF_INET;
     hints.ai_socktype = SOCK_STREAM;
 
-    // if(inet_pton(AF_INET, server_ip_.c_str(), &server_addr.sin_addr) <= 0)
-
     int err = getaddrinfo(server_ip_.c_str(), std::to_string(port_).c_str(), &hints, &res);
-    if(err != 0)
+    if(err != 0) 
     {
         std::cerr<<"getaddrinfo failed: "<<gai_strerror(err)<<std::endl;
+        freeaddrinfo(res);
+        return false;
+    }
+
+    sock_fd_ = socket(res->ai_family, res->ai_socktype, res->ai_protocol);
+    if(sock_fd_ < 0) {
+        perror("Socket creation failed!!");
+        freeaddrinfo(res);
         close(sock_fd_);
         return false;
     }
 
-    // if(connect(sock_fd_, (struct sockaddr*)&server_addr, sizeof(server_addr)) < 0)
-    if(connect(sock_fd_, res->ai_addr, res->ai_addrlen) < 0)
-    {
+    if(connect(sock_fd_, res->ai_addr, res->ai_addrlen) < 0) {
         perror("Connection failed!!");
         freeaddrinfo(res);
         close(sock_fd_);
+        sock_fd_ = -1; 
         return false;
     }
 
@@ -74,31 +77,29 @@ bool Client::login()
     while(!login_success && running_)
     {
         char buffer[BUFFER_SIZE];
-        ssize_t n = recv(sock_fd_, buffer, sizeof(buffer) - 1, 0);
-        if(n <= 0)
-        {
-            std::cerr<<"\nConncetion closed during login."<<std::endl;
+        ssize_t n = recv(sock_fd_, buffer, sizeof(buffer) - 1, 0); 
+        if(n <= 0) {
+            std::cerr << "\nConnection closed during login." << std::endl;
             return false;
         }
         buffer[n] = '\0';
         
-        //v3
         in_buf_.append(buffer, n);
         std::string server_msg_payload;
 
-        while(true)
+        while(true) 
         {
             if(in_buf_.size() < sizeof(uint32_t))
             {
                 // Not enough data for a header yet; try receiving more
                 break;
-            }
+            } 
 
             uint32_t net_len;
             memcpy(&net_len, in_buf_.data(), sizeof(uint32_t));
             uint32_t payload_len = ntohl(net_len);
-
-            if(in_buf_.size() < (sizeof(uint32_t) + payload_len))
+            
+            if(in_buf_.size() < (sizeof(uint32_t) + payload_len)) 
             {
                 // Not enough data for full payload yet; wait for more
                 break;
@@ -108,7 +109,7 @@ bool Client::login()
             in_buf_.erase(0, sizeof(uint32_t) + payload_len);
 
             // We successfully parsed one server message
-            break;
+            break; 
         }
 
         if(server_msg_payload.empty())
@@ -118,34 +119,80 @@ bool Client::login()
         }
         std::cout << "\r\033[K" << server_msg_payload << std::flush;
         
-        if(server_msg_payload.find("Username accepted!") != std::string::npos)
+        if(server_msg_payload.find("Username accepted!") != std::string::npos) 
         {
             login_success = true;
         }
-        else
+        else 
         {
-            username_.clear(); 
-            char c;
-            while(running_ && read(STDIN_FILENO, &c, 1) == 1 && c != '\n' && c != '\r')
+            while(running_)
             {
-                if(isprint(c))
+                username_.clear(); 
+                char c;
+                
+                while(running_)
                 {
-                    username_ += c;
-                    std::cout<<c<<std::flush;
-                }
-                else if((c == 127 || c == 8) && !username_.empty())
-                {
-                    username_.pop_back();
-                    std::cout<<"\b \b"<<std::flush;
-                }
-            }
+                    struct pollfd pfd[2];
+                    pfd[0].fd = STDIN_FILENO; 
+                    pfd[0].events = POLLIN;
+                    pfd[1].fd = sig_fd_;      
+                    pfd[1].events = POLLIN;
 
-            std::cout<<std::endl;
+                    int ret = poll(pfd, 2, -1);
+                    if (ret < 0 && errno != EINTR) 
+                    {
+                        break;
+                    }
+                    // signal (Ctrl+C)
+                    if (pfd[1].revents & POLLIN) {
+                        std::cout << "\nExiting..." << std::endl;
+                        running_ = false;
+                        return false;
+                    }
+
+                    // keyboard input
+                    if (pfd[0].revents & POLLIN) 
+                    {
+                        if (read(STDIN_FILENO, &c, 1) <= 0) 
+                        { 
+                            running_ = false; 
+                            break; 
+                        }
+                        
+                        if (c == '\n' || c == '\r') 
+                        {
+                            break;
+                        }
+
+                        if (isprint(c)) 
+                        {
+                            username_ += c;
+                            std::cout << c << std::flush;
+                        }
+                        else if ((c == 127 || c == 8) && !username_.empty()) 
+                        {
+                            username_.pop_back();
+                            std::cout << "\b \b" << std::flush;
+                        }
+                    }
+                }
+
+                if (!running_) return false;
+
+                std::cout << std::endl;
+
+                if (username_.empty()) 
+                {
+                    std::cout << "Username cannot be empty. Please enter a username: " << std::flush;
+                    continue;
+                }
+                break;
+            }
             
-            //v3
+            //send Username Packet
             uint32_t len = username_.size();
             uint32_t net_len = htonl(len);
-
+            
             if(send(sock_fd_, &net_len, sizeof(uint32_t), MSG_NOSIGNAL) < 0)
             {
                 perror("Failed to send username header!!");
@@ -158,11 +205,9 @@ bool Client::login()
             }
         }
 
-        if(login_success)
-        {
+        if(login_success) {
             prompt_ = "[" + username_ + "]: ";
         }
-
     }
     return login_success;
 }
@@ -172,69 +217,13 @@ void Client::run()
     set_nonblocking(sock_fd_);
     set_nonblocking(STDIN_FILENO);
 
-    setup_epoll();
+    std::cout << prompt_ << std::flush;
 
-    std::cout<<prompt_<<std::flush;
-    epoll_event events[MAX_EVENTS];
+    running_ = true;
+    receiver_thread_ = std::thread(&Client::receive_loop, this);
+    printer_thread_ = std::thread(&Client::printer_loop, this);
 
-    while(running_)
-    {
-        int nfds = epoll_wait(epoll_fd_, events, MAX_EVENTS, -1);
-        if(nfds == -1)
-        {
-            if(errno == EINTR) continue;
-            perror("epoll wait");
-            break;
-        }
-
-        for(int i = 0; i < nfds; ++i)
-        {   
-            if(!running_) break;
-
-            // if(events[i].events & (EPOLLERR | EPOLLHUP))
-            if(events[i].events & (EPOLLERR | EPOLLHUP | EPOLLRDHUP))
-            {
-                if(events[i].data.fd == sock_fd_)
-                {
-                    std::cout << "\r\033[KServer connection lost." << std::endl;
-                }
-                stop();
-
-                break;
-        
-            }
-            else if(events[i].data.fd == sig_fd_)
-            {
-                struct signalfd_siginfo fdsi;
-                ssize_t s = read(sig_fd_, &fdsi, sizeof(fdsi));
-                if(s != sizeof(fdsi))
-                {
-                    perror("read");
-                    // running_ = false;
-                    stop();
-                    break;
-                }
-
-                std::cout<<"\nSignal received, exiting...\n";
-                stop();
-            }
-            else if(events[i].data.fd == sock_fd_)
-            {
-                if(events[i].events & EPOLLIN)
-                {
-                    handle_server_message();
-                }
-            }
-            else if(events[i].data.fd == STDIN_FILENO)
-            {
-                if(events[i].events & EPOLLIN)
-                {
-                    handle_keyboard_input();
-                }
-            }
-
-        }
-    }
+    input_loop();
 }
 
 void Client::setup_signalfd()
@@ -243,182 +232,188 @@ void Client::setup_signalfd()
     sigemptyset(&mask);
     sigaddset(&mask, SIGINT);
     sigaddset(&mask, SIGTERM);
-
-    if(sigprocmask(SIG_BLOCK, &mask, nullptr) == -1)
+    if(sigprocmask(SIG_BLOCK, &mask, nullptr) == -1) 
     {
-        perror("sigprocmask");
-        exit(1);
+         perror("sigprocmask");
+         exit(1); 
     }
     sig_fd_ = signalfd(-1, &mask, SFD_NONBLOCK | SFD_CLOEXEC);
-    if(sig_fd_ == -1)
-    {
-        perror("signalfd");
-        exit(1);
-    }
-}
-void Client::setup_epoll()
-{
-    epoll_fd_ = epoll_create1(0);
-    if(epoll_fd_ == -1)
-    {
-        perror("epoll_create1");
-        stop();
-        exit(1);
-    }
-    epoll_event ev;
-    ev.events = EPOLLIN | EPOLLET;
-
-    ev.data.fd = sig_fd_;
-    if(epoll_ctl(epoll_fd_, EPOLL_CTL_ADD, sig_fd_, &ev) == -1)
-    {
-        perror("epoll_ctl (sig_fd)");
-        stop();
-        exit(1);
-    }
-
-    ev.events = EPOLLIN | EPOLLET | EPOLLRDHUP;
-
-    ev.data.fd = sock_fd_;
-    if(epoll_ctl(epoll_fd_, EPOLL_CTL_ADD, sock_fd_, &ev) == -1)
-    {
-        perror("epoll_ctl (sock_fd)");
-        // running_ = false;
-        stop();
-        return;
-    }
-    
-    ev.events = EPOLLIN | EPOLLET;
-
-    ev.data.fd = STDIN_FILENO;
-    if(epoll_ctl(epoll_fd_, EPOLL_CTL_ADD, STDIN_FILENO, &ev) == -1)
-    {
-        perror("epoll_ctl (STDIN)");
-        stop();
-        return;
+    if(sig_fd_ == -1) 
+    { 
+        perror("signalfd"); 
+        exit(1); 
     }
 }
 
 void Client::stop()
 {
+    // already stopped
+    if(!running_) return; 
+    
     running_ = false;
+    message_queue_.stop();
+    
+    // join threads if they were started
+    if(receiver_thread_.joinable()) 
+    {
+        receiver_thread_.join();
+    }
+    if(printer_thread_.joinable())
+    {
+        printer_thread_.join();
+    }
 }
 
-void Client::handle_server_message()
+void Client::process_buffer()
 {
-    if(!running_) return;
-    
+    while(true)
+    {
+        if(in_buf_.size() < sizeof(uint32_t))
+        {
+            break;
+        }
+        uint32_t net_len;
+        memcpy(&net_len, in_buf_.data(), sizeof(uint32_t));
+        uint32_t payload_len = ntohl(net_len);
+
+        if(in_buf_.size() < (sizeof(uint32_t) + payload_len))
+        {
+            break;
+        }
+
+        std::string msg = in_buf_.substr(sizeof(uint32_t), payload_len);
+        in_buf_.erase(0, sizeof(uint32_t) + payload_len);
+
+        if(!msg.empty() && msg.back()=='\n')
+        {
+            msg.pop_back();
+        }
+        message_queue_.push(msg);
+    }
+}
+
+void Client::receive_loop()
+{
     char buffer[BUFFER_SIZE];
+    struct pollfd pfd;
+    pfd.fd = sock_fd_;
+    pfd.events = POLLIN | POLLRDHUP;
+
+    if(!in_buf_.empty())
+    {
+        process_buffer();
+    }
+
     while(running_)
     {
-        ssize_t n = recv(sock_fd_, buffer, sizeof(buffer), 0);
-        if(n > 0)
+        int ret = poll(&pfd, 1, 200);
+        if(ret < 0 && errno != EINTR)
         {
+            break;
+        }
+        if(pfd.revents & (POLLERR | POLLHUP | POLLRDHUP))
+        {
+            message_queue_.push("Server connection lost.");
+            stop();
+            break;
+        }
+        if(pfd.revents & POLLIN)
+        {
+            ssize_t n = recv(sock_fd_, buffer, sizeof(buffer), 0);
+            if(n <= 0) break;
             in_buf_.append(buffer, n);
-            while(true)
+            process_buffer();
+        }
+    }
+}
+
+void Client::printer_loop()
+{
+    std::string msg;
+    while(message_queue_.pop(msg))
+    {
+        std::lock_guard<std::mutex> lock(ui_mtx_);
+        std::cout << "\r\033[K" << msg << std::endl;
+        std::cout << prompt_ << current_line_ << std::flush;
+    }
+}
+
+void Client::input_loop()
+{
+    struct pollfd fds[2];
+    fds[0].fd = STDIN_FILENO;
+    fds[0].events = POLLIN;
+    fds[1].fd = sig_fd_;
+    fds[1].events = POLLIN;
+
+    char c;
+    while(running_)
+    {
+        int ret = poll(fds, 2, 200);
+        if(ret < 0 && errno != EINTR)
+        {
+            break;
+        }
+        
+        //ctrl+c
+        if(fds[1].revents & POLLIN)
+        {
+            std::cout << "\nExiting..." << std::endl;
+            stop();
+            break;
+        }
+
+        if(fds[0].revents & POLLIN)
+        {
+            if(read(STDIN_FILENO, &c, 1) <= 0)
             {
-                if(in_buf_.size() < sizeof(uint32_t)) break;
+                stop();
+                break;
+            }
 
-                uint32_t net_len;
-                memcpy(&net_len, in_buf_.data(), sizeof(uint32_t));
-                uint32_t payload_len = ntohl(net_len);
-
-                if(in_buf_.size() < (sizeof(uint32_t) + payload_len))
+            std::lock_guard<std::mutex> lock(ui_mtx_);
+            if(c == '\n' || c == '\r')
+            {
+                if(current_line_ == "exit")
                 {
+                    stop();
                     break;
                 }
 
-                std::string msg = in_buf_.substr(sizeof(uint32_t), payload_len);
-                in_buf_.erase(0, sizeof(uint32_t) + payload_len);
-
-                std::cout << "\r\033[K" << msg;
-                if(!msg.empty() && msg.back() != '\n')
+                if(!current_line_.empty())
                 {
-                    std::cout << std::endl;
+                    
+                    std::cout << "\r\033[K" << prompt_ << current_line_ << std::endl;
+                    uint32_t len = current_line_.size();
+                    uint32_t net_len = htonl(len);
+                    if(send(sock_fd_, &net_len, sizeof(uint32_t), MSG_NOSIGNAL) < 0)
+                    {
+                        stop();
+                        break;
+                    }
+                    if(send(sock_fd_, current_line_.c_str(), len, MSG_NOSIGNAL) < 0)
+                    {
+                        stop();
+                        break;
+                    }
+
+                    current_line_.clear();
+                    std::cout << prompt_ << std::flush;
                 }
             }
-
-            // continue reading until EAGAIN
-            continue;
-        }
-        else
-        {
-            if(errno == EAGAIN || errno == EWOULDBLOCK)
+            else if(c == 127 || c == 8)
             {
-                break;
-            }
-            else
-            {
-                std::cout << "\r\033[KServer connection lost." << std::endl;
-                stop();
-                break;
-            }
-        }
-    }
-    if(running_)
-    {
-        std::cout<<"\r\033[K"<<prompt_<<current_line_<<std::flush;
-    }
-}
-
-void Client::handle_keyboard_input()
-{
-    if(!running_) return;
-
-    char c;
-    while(read(STDIN_FILENO, &c, 1) > 0)
-    {
-        if(c == '\n' || c == '\r')
-        {
-            if(current_line_ == "exit")
-            {
-                stop();
-                return;
-            }
-
-            if(!current_line_.empty())
-            {
-                std::cout << "\r\033[K" << prompt_ << current_line_ << std::endl; 
-                // std::string message_to_send = current_line_ + "\n";
-                
-                uint32_t len = current_line_.size();
-                uint32_t net_len = htonl(len);
-
-                if(send(sock_fd_, &net_len, sizeof(uint32_t), MSG_NOSIGNAL) < 0)
+                if(!current_line_.empty())
                 {
-                    perror("Send failed (header)!!");
-                    stop();
-                    return;
+                    current_line_.pop_back();
+                    std::cout << "\r\033[K" << prompt_ << current_line_ << std::flush;
                 }
-
-                if(send(sock_fd_, current_line_.c_str(), len, 0) < 0)
-                {
-                    perror("Send failed (payload)!!");
-                    stop();
-                    return;
-                }           
-                current_line_.clear();
             }
-            else continue;
-            
-            std::cout<<prompt_<<std::flush;
-        }
-        else if(c == 127 || c == 8)
-        {
-            if(!current_line_.empty())
+            else if(isprint(c))
             {
-                current_line_.pop_back();
-                std::cout << "\r\033[K" << prompt_ << current_line_ << std::flush;
+                current_line_ += c;
+                std::cout << c << std::flush;
             }
-            else if(current_line_.empty())
-            {
-                std::cout<<"\a"<<std::flush;
-                std::cout<<"\r\033[K" << prompt_ << std::flush;
-            }
-        }
-        else if(isprint(c))
-        {
-            current_line_ += c;
-            std::cout<<c<<std::flush;
         }
     }
 }
@@ -439,6 +434,5 @@ void Client::enable_raw_mode()
     atexit(disable_raw_mode);
     struct termios raw = orig_termios_;
     raw.c_lflag &= ~(ICANON | ECHO);
-
     tcsetattr(STDIN_FILENO, TCSAFLUSH, &raw);
 }

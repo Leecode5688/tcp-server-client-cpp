@@ -1,6 +1,6 @@
 cmake_minimum_required(VERSION 3.10)
 
-project(ReactorServer VERSION 3.0 LANGUAGES CXX)
+project(ReactorServer VERSION 3.1 LANGUAGES CXX)
 
 set(CMAKE_CXX_STANDARD 17)
 set(CMAKE_CXX_STANDARD_REQUIRED ON)
@@ -17,10 +17,12 @@ find_package(Threads REQUIRED)
 target_link_libraries(chat_server PRIVATE Threads::Threads)
 
 #------------ FOR CLIENT --------------
-add_executable(epoll_client
-               main_epoll_client.cpp
+add_executable(chat_client
+               main_client.cpp
                client.cpp)   
+target_link_libraries(chat_client PRIVATE Threads::Threads)
 
 #------------ FOR LOAD TESTER --------------
 add_executable(load_bot load_bot.cpp)
 target_link_libraries(load_bot PRIVATE Threads::Threads)
+

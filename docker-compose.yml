@@ -20,7 +20,7 @@ services:
     build:
       context: .
       dockerfile: Dockerfile
-    command: ./epoll_client
+    command: ./chat_client
     environment:
       - SERVER_IP=server
     stdin_open: true
@@ -38,4 +38,4 @@ services:
     depends_on:
       - server
     deploy:
-      replicas: 10
+      replicas: 3

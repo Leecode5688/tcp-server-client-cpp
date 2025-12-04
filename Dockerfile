@@ -16,7 +16,7 @@ RUN useradd -m appuser
 WORKDIR /app
 
 COPY --from=builder /app/v3/build/chat_server .
-COPY --from=builder /app/v3/build/epoll_client .
+COPY --from=builder /app/v3/build/chat_client .
 COPY --from=builder /app/v3/build/load_bot .
 
 EXPOSE 8888
