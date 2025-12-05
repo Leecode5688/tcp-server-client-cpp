@@ -98,6 +98,7 @@ public:
     //api
     void Send(ConnPtr conn, const std::vector<char>& data);
     void Broadcast(const std::vector<char>& data, int exclude_fd = -1);
+    void Close(ConnPtr conn);
     void Run();
     void Stop();
 };

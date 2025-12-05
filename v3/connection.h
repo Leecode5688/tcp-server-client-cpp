@@ -62,10 +62,17 @@ struct Connection {
     //true if currently in the processing queue
     bool needs_processing{false};
 
+    //for rate limiting
+    int message_count = 0;
+    std::chrono::steady_clock::time_point last_msg_time;
+
     //optimization: idle timeout tracking
     std::chrono::steady_clock::time_point last_activity;
 
+    bool is_broadcast_recipient = false;
+
     explicit Connection(int fd_) : sock(fd_) {
+        last_msg_time = std::chrono::steady_clock::now();
         update_activity();
     }
 

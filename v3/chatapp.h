@@ -43,6 +43,30 @@ public:
         //handle login or broadcast
         server_.OnMessageRecv = [this](ConnPtr conn, std::vector<char> raw_msg)
         {
+            //spam check
+            auto now = std::chrono::steady_clock::now();
+            auto duration = std::chrono::duration_cast<std::chrono::seconds>(now - conn->last_msg_time);
+
+            if(duration.count() < 1)
+            {
+                //still in the same second window
+                conn->message_count++;
+                if(conn->message_count > 10)
+                {
+                    std::string log_msg = "Spam detected from fd " + std::to_string(conn->fd()) + " username: " + conn->username;
+                    LOG_ERROR(log_msg);
+                    std::string warn = "[Server]: You are sending messages too quickly. Disconnecting...\n";
+                    server_.Send(conn, {warn.begin(), warn.end()});
+                    server_.Close(conn);
+                    return;
+                }
+            }
+            else
+            {
+                conn->message_count = 1;
+                conn->last_msg_time = now;
+            }
+
             std::string text(raw_msg.begin(), raw_msg.end());
             if(conn->state == ConnState::AWAITING_USERNAME)
             {
@@ -60,9 +84,9 @@ public:
                 {
                     conn->username = text;
                     conn->state = ConnState::ACTIVE;
+                    conn->is_broadcast_recipient = true;
                     std::string reply = "[Server]: Username accepted!\n";
-                    server_.Broadcast({reply.begin(), reply.end()});
-
+                    server_.Send(conn, {reply.begin(), reply.end()});
                     std::string join = "[Server]: " + text + " joined!\n";  
                     server_.Broadcast({join.begin(), join.end()}, conn->fd());              
                 }

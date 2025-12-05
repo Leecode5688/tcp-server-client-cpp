@@ -379,6 +379,9 @@ void WebServer::process_global_queue()
         {
             ConnPtr conn = pair.second;
             if(!conn || conn->closed.load()) continue;
+
+            if(!conn->is_broadcast_recipient) continue;
+
             std::lock_guard<std::mutex> conn_lk(conn->mtx);
 
             if(conn->closed.load()) continue;
@@ -509,74 +512,86 @@ void WebServer::handle_read(ConnPtr conn)
     bool should_close = false;
     {
         std::lock_guard<std::mutex> lk(conn->mtx);
-        auto iovecs = conn->in_buf.get_writeable_iovecs();
-        if(iovecs.empty())
+        while(true) 
         {
-            // mod_fd_epoll(conn->fd(), EPOLLOUT);
-            update_epoll_events(conn, EPOLLOUT);
-            return;
-        }
+            auto iovecs = conn->in_buf.get_writeable_iovecs();
 
-        ssize_t n = readv(conn->fd(), iovecs.data(), iovecs.size());
-
-        if(n > 0)
-        {
-            conn->in_buf.commit_write(n);
-            conn->update_activity();
-            METRICS.on_bytes_received(n);
-
-            while(true)
+            //client sent a message larger than our buffer can hold
+            if(iovecs.empty())
             {
-                if(conn->in_buf.size() < sizeof(uint32_t))
+                // update_epoll_events(conn, EPOLLOUT);
+                LOG_ERROR("Buffer full. Closing fd: " + std::to_string(conn->fd()));
+                should_close = true;
+                break;
+            }
+
+            ssize_t n = readv(conn->fd(), iovecs.data(), iovecs.size());
+
+            if(n > 0)
+            {
+                conn->in_buf.commit_write(n);
+                conn->update_activity();
+                METRICS.on_bytes_received(n);
+
+                //process complete messages in the buffer
+                while(true)
+                {
+                    if(conn->in_buf.size() < sizeof(uint32_t))
+                    {
+                        break;
+                    }
+
+                    char header[4];
+                    conn->in_buf.peek(header, 4);
+                    uint32_t net_len;
+                    memcpy(&net_len, header, sizeof(uint32_t));
+                    uint32_t payload_len = ntohl(net_len);
+                    if(payload_len > MAX_PAYLOAD_SIZE)
+                    {
+                        should_close = true;
+                        break;
+                    }
+
+                    if(conn->in_buf.size() < sizeof(uint32_t) + payload_len) 
+                    {
+                        break;
+                    }
+
+                    conn->in_buf.consume(sizeof(uint32_t));
+                    std::vector<char> payload(payload_len);
+                    conn->in_buf.peek(payload.data(), payload_len);
+                    conn->in_buf.consume(payload_len);
+                    METRICS.on_message_received();
+
+                    if(OnMessageRecv)
+                    {
+                        threadpool_->push_task([this, conn, payload]()
+                        {
+                            OnMessageRecv(conn, payload);
+                        });
+                    }
+
+                }
+            }
+            else if(n == 0)
+            {
+                should_close = true;
+                break;
+            }
+            else
+            {
+                if(errno == EAGAIN || errno == EWOULDBLOCK)
                 {
                     break;
                 }
-
-                char header[4];
-                conn->in_buf.peek(header, 4);
-                uint32_t net_len;
-                memcpy(&net_len, header, sizeof(uint32_t));
-                uint32_t payload_len = ntohl(net_len);
-                if(payload_len > MAX_PAYLOAD_SIZE)
+                else
                 {
                     should_close = true;
                     break;
                 }
-
-                if(conn->in_buf.size() < sizeof(uint32_t) + payload_len) 
-                {
-                    break;
-                }
-
-                conn->in_buf.consume(sizeof(uint32_t));
-                std::vector<char> payload(payload_len);
-                conn->in_buf.peek(payload.data(), payload_len);
-                conn->in_buf.consume(payload_len);
-                METRICS.on_message_received();
-
-                if(OnMessageRecv)
-                {
-                    threadpool_->push_task([this, conn, payload]()
-                    {
-                        OnMessageRecv(conn, payload);
-                    });
-                }
-
-            }
-        }
-        else if(n == 0)
-        {
-            should_close = true;
-        }
-        else
-        {
-            if(errno != EAGAIN && errno != EWOULDBLOCK)
-            {
-                should_close = true;
             }
         }
     }
-
     if(should_close)
     {
         close_conn(conn);
@@ -662,6 +677,11 @@ void WebServer::check_timeouts()
         METRICS.on_timeout();
         close_conn(conn);
     }
+}
+
+void WebServer::Close(ConnPtr conn)
+{
+    close_conn(conn);
 }
 
 void WebServer::Run()
