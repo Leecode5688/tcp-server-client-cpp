@@ -1,17 +1,17 @@
-#include "webserver.h"
-
-#define PORT 8888
-#define DEFAULT_WORKERS 5
+#include "chatapp.h"
+#include <iostream>
 
 int main(int argc, char** argv)
 {
-    int workers = DEFAULT_WORKERS;
+    int port = 8888;
     if(argc > 1)
     {
-        workers = std::stoi(argv[1]);
+        port = std::stoi(argv[1]);
     }
+    std::cout<<"Starting ChatApp on port: "<<port<<"....\n";
+    ChatApp app(port);
+    app.Run();
 
-    WebServer server(PORT, workers);
-    server.run();
+
     return 0;
 }

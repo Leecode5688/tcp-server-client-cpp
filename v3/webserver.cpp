@@ -85,7 +85,7 @@ WebServer::WebServer(int port, int n_workers) :
 }
 
 WebServer::~WebServer(){
-    stop();
+    Stop();
 }
 
 void WebServer::setup_signalfd()
@@ -304,10 +304,47 @@ bool WebServer::attempt_write(ConnPtr conn)
     return false;
 }
 
+void WebServer::Send(ConnPtr conn, const std::vector<char>& data)
+{
+    std::lock_guard<std::mutex> lk(conn->mtx);
+    if(conn->closed) return;
+
+    OutgoingPacket pkt = make_packet(data);
+    conn->outgoing_queue.push_back(pkt);
+    conn->pending_bytes += (4 + pkt.payload->size());
+
+    //watermark check
+    if(!conn->is_reading_paused && conn->pending_bytes >= HIGH_WATER_MARK)
+    {
+        conn->is_reading_paused = true;
+    }
+
+    attempt_write(conn);
+
+    uint32_t events = 0;
+
+    if(!conn->outgoing_queue.empty())
+    {
+        events |= EPOLLOUT;
+        conn->is_write_armed = true;
+    }
+    else
+    {
+        conn->is_write_armed = false;
+    }
+    if(!conn->is_reading_paused && !conn->in_buf.full())
+    {
+        events |= EPOLLIN;
+    }
+
+    update_epoll_events(conn, events);
+}
+
 //centralized batched pub/sub processor
 void WebServer::process_global_queue()
 {
-    std::deque<ChatEvent> local_batch;
+    // std::deque<ChatEvent> local_batch;
+    std::deque<BroadcastEvent> local_batch;
     bool more_work_remains = false;
     {
         std::lock_guard<std::mutex> lk(global_queue_mtx_);
@@ -321,8 +358,8 @@ void WebServer::process_global_queue()
 
     if(local_batch.empty()) return;
 
+    
     std::vector<std::pair<int, OutgoingPacket>> ready_broadcasts;
-    std::vector<int> flush_targets;
 
     ready_broadcasts.reserve(local_batch.size());
 
@@ -330,71 +367,10 @@ void WebServer::process_global_queue()
     {
         if(!evt.payload)
         {
-            if(evt.sender_fd != -1)
-            {
-                flush_targets.push_back(evt.sender_fd);
-                continue;
-            }
+            continue;
         }
 
-        std::vector<char> final_msg;
-        if(evt.is_system_msg)
-        {
-            final_msg.insert(final_msg.end(), evt.payload->begin(), evt.payload->end());
-        }
-        else
-        {
-            std::string prefix = "[" + evt.username + "]: ";
-            final_msg.reserve(prefix.size() + evt.payload->size());
-            final_msg.insert(final_msg.end(), prefix.begin(), prefix.end());
-            final_msg.insert(final_msg.end(), evt.payload->begin(), evt.payload->end());
-        }
-
-        ready_broadcasts.push_back({evt.sender_fd, make_packet(final_msg)});
-    }
-
-    //no broadcast, but do have specific targets like login errors
-    if(ready_broadcasts.empty() && !flush_targets.empty())
-    {
-        std::shared_lock<std::shared_mutex> map_lock(conn_map_mtx_);
-        for(int fd : flush_targets)
-        {
-            auto it = connections_.find(fd);
-            if(it == connections_.end())
-            {
-                continue;
-            }
-            
-            ConnPtr conn = it->second;
-            std::lock_guard<std::mutex> conn_lk(conn->mtx);
-            
-            if(conn->closed.load()) continue;
-
-            attempt_write(conn);
-
-            uint32_t events = 0;
-            if(!conn->outgoing_queue.empty())
-            {
-                events |= EPOLLOUT;
-                conn->is_write_armed = true;
-            }
-            else
-            {
-                conn->is_write_armed = false;
-            }
-
-            if(!conn->is_reading_paused && !conn->in_buf.full())
-            {
-                events |= EPOLLIN;
-            }
-            update_epoll_events(conn, events);
-        }
-        if(more_work_remains)
-        {
-            uint64_t one = 1;
-            write(notify_fd_, &one, sizeof(one));
-        }
-        return;
+        ready_broadcasts.push_back({evt.sender_fd, make_packet(*evt.payload)});
     }
 
     {   
@@ -402,77 +378,60 @@ void WebServer::process_global_queue()
         for(auto& pair : connections_)
         {
             ConnPtr conn = pair.second;
-            if(!conn || conn->closed.load() || conn->state != ConnState::ACTIVE) continue;
-
+            if(!conn || conn->closed.load()) continue;
             std::lock_guard<std::mutex> conn_lk(conn->mtx);
 
-            //if EPOLLOUT armed, don't waste system calls
-            //just queue the message
-            if(conn->is_write_armed)
-            {
-                for(const auto& item : ready_broadcasts)
-                {
-                    if(item.first != -1 && item.first == conn->fd()) continue;
+            if(conn->closed.load()) continue;
 
-                    if(conn->outgoing_queue.size() >= MAX_OUTGOING_QUEUE_SIZE)
-                    {
-                        METRICS.on_message_dropped();
-                        continue;
-                    }
-                    conn->outgoing_queue.push_back(item.second);
-                    conn->pending_bytes += (4 + item.second.payload->size());
+            bool needs_epoll_update = false;
+
+            for(const auto& item : ready_broadcasts)
+            {
+                int exclude_fd = item.first;
+                const OutgoingPacket& pkt = item.second;
+
+                if(exclude_fd != -1 && exclude_fd == conn->fd()) continue;
+
+                if(conn->outgoing_queue.size() >= MAX_OUTGOING_QUEUE_SIZE)
+                {
+                    METRICS.on_message_dropped();
+                    continue;
                 }
-                continue;
-            }
-            
-            //normal path, sockets are believed to be writable
-            if(!ready_broadcasts.empty())
-            {
-                for(const auto& item : ready_broadcasts)
+
+                conn->outgoing_queue.push_back(pkt);
+                conn->pending_bytes += (4 + pkt.payload->size());
+                needs_epoll_update = true;
+
+
+                if(!conn->is_reading_paused && conn->pending_bytes >= HIGH_WATER_MARK)
                 {
-                    int sender_fd = item.first;
-                    const OutgoingPacket& pkt = item.second;
-
-                    if(sender_fd != -1 && sender_fd == conn->fd()) continue;
-
-                    if(conn->outgoing_queue.size() >= MAX_OUTGOING_QUEUE_SIZE)
-                    {
-                        METRICS.on_message_dropped();
-                        continue;
-                    }
-
-                    conn->outgoing_queue.push_back(pkt);
-                    conn->pending_bytes += (4 + pkt.payload->size());
+                    conn->is_reading_paused = true;
                 }
             }
 
-            //flow control check
-            if(!conn->is_reading_paused && conn->pending_bytes >= HIGH_WATER_MARK)
+            if(needs_epoll_update)
             {
-                conn->is_reading_paused = true;
-            }
+                bool error = attempt_write(conn);
+                if(error) continue;
 
-            bool error = attempt_write(conn);
-            if(error) continue;
+                uint32_t events = 0;
+                if(!conn->outgoing_queue.empty())
+                {
+                    events |= EPOLLOUT;
+                    conn->is_write_armed = true;
+                }
+                else
+                {
+                    conn->is_write_armed = false;
+                }
 
-            uint32_t events = 0;
-            if(!conn->outgoing_queue.empty())
-            {
-                events |= EPOLLOUT;
-                conn->is_write_armed = true;
-            }
-            else
-            {
-                conn->is_write_armed = false;
-            }
+                if(!conn->is_reading_paused && !conn->in_buf.full())
+                {
+                    events |= EPOLLIN;
+                }
 
-            if(!conn->is_reading_paused && !conn->in_buf.full())
-            {
-                events |= EPOLLIN;
+                update_epoll_events(conn, events);
             }
-
-            // mod_fd_epoll(conn->fd(), events);
-            update_epoll_events(conn, events);
         }
     }
 
@@ -483,28 +442,21 @@ void WebServer::process_global_queue()
     }
 }
 
-void WebServer::publish_to_global_queue(int sender_fd, std::string username, std::shared_ptr<std::vector<char>> payload, bool is_system)
+
+void WebServer::Broadcast(const std::vector<char>& data, int exclude_fd)
 {
     {
         std::lock_guard<std::mutex> lk(global_queue_mtx_);
 
-        if(global_queue_.size() >= MAX_GLOBAL_QUEUE_SIZE)
-        {
-            METRICS.on_message_dropped();
-            return;
-        }
-
-        ChatEvent evt;
-        evt.sender_fd = sender_fd;
-        evt.username = username;
-        evt.payload = payload;
-        evt.is_system_msg = is_system;
+        BroadcastEvent evt;
+        evt.sender_fd = exclude_fd;
+        evt.payload = std::make_shared<std::vector<char>>(data);
         global_queue_.push_back(evt);
     }
-
     uint64_t one = 1;
     write(notify_fd_, &one, sizeof(one));
 }
+
 
 void WebServer::accept_loop()
 {
@@ -545,83 +497,11 @@ void WebServer::accept_loop()
         LOG_INFO("Accepted "+ std::string(ip) + ":" + std::to_string(ntohs(client_addr.sin_port))
             + " fd = " + std::to_string(client_fd));
 
-        std::string welcomeMessage = "[Server]: Welcome! Please enter your username: ";
-
-        auto payload = std::make_shared<std::vector<char>>(welcomeMessage.begin(), welcomeMessage.end());
-
-        OutgoingPacket pkt = make_packet(*payload);
+        if(OnClientConnect)
         {
-            std::lock_guard<std::mutex> conn_lk(conn->mtx);
-            conn->outgoing_queue.push_back(pkt);
-            conn->pending_bytes += (4 + payload->size());
-            attempt_write(conn);
-            uint32_t ev = EPOLLIN;
-            if(!conn->outgoing_queue.empty())
-            {
-                // mod_fd_epoll(conn->fd(), EPOLLIN | EPOLLOUT);
-                ev |= EPOLLOUT;
-                conn->is_write_armed = true;
-                update_epoll_events(conn, ev);
-            }
+            OnClientConnect(conn);
         }
     }
-}
-
-void WebServer::handle_login_task(ConnPtr conn, std::string username)
-{
-    if(conn->closed.load()) return;
-
-    std::lock_guard<std::mutex> conn_lk(conn->mtx);
-
-    if(conn->closed.load()) return;
-
-    bool validName = false;
-    
-    {
-        std::unique_lock<std::shared_mutex> user_name_lk(usernames_mtx_);
-        if(!usernames_.count(username) && !username.empty() && username.size() < 50)
-        {
-            usernames_.insert(username);
-            validName = true;
-        }
-    }
-
-    std::string response_msg;
-    bool needs_broadcast = false;
-
-    if(validName)
-    {
-        
-        conn->username = username;
-        conn->state = ConnState::ACTIVE;
-    
-        response_msg = "[Server]: Username accepted! You have entered the chat!\n";
-        needs_broadcast = true;
-    }
-    else
-    {
-        response_msg = "[Server]: Username is invalid or already used. Please try another one: ";    
-    }
-
-    auto payload = std::make_shared<std::vector<char>>(response_msg.begin(), response_msg.end());
-    OutgoingPacket pkt = make_packet(*payload);
-
-
-    conn->outgoing_queue.push_back(pkt);
-    conn->pending_bytes += (4 + pkt.payload->size());
-
-
-    if(needs_broadcast)
-    {
-        std::string joinMessage = "[Server]: " + username + " has joined the chatroom!\n";    
-        auto payload_ptr = std::make_shared<std::vector<char>>(joinMessage.begin(), joinMessage.end());
-        publish_to_global_queue(-1, "", payload_ptr, true);
-    }
-    else
-    {
-        publish_to_global_queue(conn->fd(), "", nullptr, true);
-    }
-
 }
 
 void WebServer::handle_read(ConnPtr conn)
@@ -642,6 +522,7 @@ void WebServer::handle_read(ConnPtr conn)
         if(n > 0)
         {
             conn->in_buf.commit_write(n);
+            conn->update_activity();
             METRICS.on_bytes_received(n);
 
             while(true)
@@ -668,29 +549,19 @@ void WebServer::handle_read(ConnPtr conn)
                 }
 
                 conn->in_buf.consume(sizeof(uint32_t));
-                auto payload_ptr = std::make_shared<std::vector<char>>(payload_len);
-
-                conn->in_buf.peek(payload_ptr->data(), payload_len);
+                std::vector<char> payload(payload_len);
+                conn->in_buf.peek(payload.data(), payload_len);
                 conn->in_buf.consume(payload_len);
                 METRICS.on_message_received();
 
-                if(conn->state == ConnState::AWAITING_USERNAME)
+                if(OnMessageRecv)
                 {
-                    std::string username(payload_ptr->begin(), payload_ptr->end());
-                    threadpool_->push_task([this, conn, username]
+                    threadpool_->push_task([this, conn, payload]()
                     {
-                        this->handle_login_task(conn, username);
+                        OnMessageRecv(conn, payload);
                     });
                 }
-                else if(conn->state == ConnState::ACTIVE)
-                {
-                    std::string usr_name = conn->username;
-                    int s_fd = conn->fd();
-                    threadpool_->push_task([this, s_fd, usr_name, payload_ptr]
-                    {
-                        this->publish_to_global_queue(s_fd, usr_name, payload_ptr);
-                    });
-                }
+
             }
         }
         else if(n == 0)
@@ -754,25 +625,10 @@ void WebServer::close_conn(ConnPtr conn)
 
     METRICS.on_connection_closed();
 
-    std::string leave_msg;
-    std::string captured_username;
 
+    if(OnClientDisconnect)
     {
-        std::lock_guard<std::mutex> conn_lk(conn->mtx);
-        captured_username = conn->username;
-    }
-
-    if(!captured_username.empty())
-    {
-        leave_msg = "[Server]: "+ captured_username + " has left the chatroom.";
-        std::unique_lock<std::shared_mutex> user_name_lk(usernames_mtx_);
-        usernames_.erase(captured_username);
-    }
-
-    if(!leave_msg.empty())
-    {
-        auto payload = std::make_shared<std::vector<char>>(leave_msg.begin(), leave_msg.end());
-        publish_to_global_queue(-1, "", payload, true);
+        OnClientDisconnect(conn);
     }
 
     epoll_ctl(epoll_fd_, EPOLL_CTL_DEL, conn->fd(), nullptr);
@@ -808,9 +664,9 @@ void WebServer::check_timeouts()
     }
 }
 
-void WebServer::run()
+void WebServer::Run()
 {
-    LOG_INFO("Chat server listening on port " + std::to_string(port_) + "...");    
+    LOG_INFO("Server listening on port " + std::to_string(port_) + "...");    
     struct epoll_event events[MAX_EVENTS];
 
     while(running_)
@@ -889,10 +745,10 @@ void WebServer::run()
         }
     }
 
-    stop();
+    Stop();
 }
 
-void WebServer::stop()
+void WebServer::Stop()
 {
     running_ = false;
     if(threadpool_)

@@ -4,24 +4,17 @@
 #include <unordered_map>
 #include <unordered_set>
 #include <shared_mutex>
+#include <netinet/in.h>
+#include <functional>
+#include <sys/uio.h>
 #include <memory>
 #include <atomic>
+#include <vector>
 #include <mutex>
 #include <deque>
-#include <vector>
-#include <netinet/in.h>
-#include <sys/uio.h>
 
 //batch size for processing writes to avoid starving the read loop
 #define WRITE_BUDGET_PER_LOOP 100
-
-//structure for internel pub/sub bus
-struct ChatEvent {
-    int sender_fd;
-    std::string username;
-    std::shared_ptr<std::vector<char>> payload;
-    bool is_system_msg = false;
-};
 
 class WebServer{
 private:
@@ -50,6 +43,11 @@ private:
 
     //centralized pub/sub processor
     void process_global_queue();
+    struct BroadcastEvent {
+        int sender_fd;
+        std::shared_ptr<std::vector<char>> payload;
+    };
+
 
     //handles the global write queue
     // void handle_pending_writes();
@@ -84,13 +82,22 @@ private:
     std::shared_mutex usernames_mtx_;
     
     //global pub/sub queue queue
-    std::deque<ChatEvent> global_queue_;
+    // std::deque<ChatEvent> global_queue_;
+    std::deque<BroadcastEvent> global_queue_;
     std::mutex global_queue_mtx_;
 
 public:
     WebServer(int port, int n_workers = 5);
     ~WebServer();
 
-    void run();
-    void stop();
+    //callback hooks
+    std::function<void(ConnPtr)> OnClientConnect;
+    std::function<void(ConnPtr)> OnClientDisconnect;
+    std::function<void(ConnPtr, std::vector<char>)> OnMessageRecv;
+
+    //api
+    void Send(ConnPtr conn, const std::vector<char>& data);
+    void Broadcast(const std::vector<char>& data, int exclude_fd = -1);
+    void Run();
+    void Stop();
 };

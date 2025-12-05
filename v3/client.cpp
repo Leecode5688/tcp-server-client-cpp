@@ -314,7 +314,8 @@ void Client::receive_loop()
         if(pfd.revents & (POLLERR | POLLHUP | POLLRDHUP))
         {
             message_queue_.push("Server connection lost.");
-            stop();
+            running_ = false;
+            // stop();
             break;
         }
         if(pfd.revents & POLLIN)

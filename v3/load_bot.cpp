@@ -110,6 +110,7 @@ int main(int argc, char** argv)
     }
 
     freeaddrinfo(res);
+    
 
     std::string welcome = recv_message(sock_fd);
     if(welcome.empty())
@@ -127,13 +128,28 @@ int main(int argc, char** argv)
         return 1;
     }
 
-    std::string confirmation = recv_message(sock_fd);
-    if(confirmation.find("Username accepted") == std::string::npos)
+    int max_retries = 20;
+    bool logged_in = false;
+
+    while(max_retries-- > 0)
     {
-        std::cerr<<"Bot "<<username<<": Login failed: "<<confirmation<<std::endl;
+        std::string msg = recv_message(sock_fd);
+        if(msg.empty()) break;
+
+        if(msg.find("Username accepted") != std::string::npos)
+        {
+            logged_in = true;
+            break;
+        }
+    }
+
+    if(!logged_in)
+    {
+        std::cerr<<"Bot "<<username<<": Login timed out or failed."<<std::endl;
         close(sock_fd);
         return 1;
     }
+
 
     std::thread render(discard_loop, sock_fd);
     render.detach();
