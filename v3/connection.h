@@ -9,6 +9,7 @@
 #include <netinet/in.h>
 
 #include "ringbuffer.h"
+#include "codec.h"
 #include "utils.h"
 
 
@@ -17,13 +18,8 @@ enum class ConnState {
     ACTIVE
 };
 
-//a single message packet to be sent over the network
 struct OutgoingPacket {
-    //4 byte header (network order), representing the length of payload
-    uint32_t net_len;
-    //shared payload, allows broadcasting the same data without copying
     std::shared_ptr<std::vector<char>> payload;
-    //tracks how many bytes of this specific packet have been sent
     size_t sent_offset = 0;
 };
 
@@ -70,6 +66,8 @@ struct Connection {
     std::chrono::steady_clock::time_point last_activity;
 
     bool is_broadcast_recipient = false;
+
+    std::unique_ptr<IProtocolCodec> codec;
 
     explicit Connection(int fd_) : sock(fd_) {
         last_msg_time = std::chrono::steady_clock::now();

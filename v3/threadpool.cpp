@@ -33,6 +33,18 @@ void ThreadPool::push_task(std::function<void()> task)
     queue_cv_.notify_one();
 }
 
+void ThreadPool::push_batch(std::vector<std::function<void()>>& tasks)
+{
+    {
+        std::lock_guard<std::mutex> lk(queue_mtx_);
+        for(auto& task : tasks)
+        {
+            task_queue_.emplace(std::move(task));
+        }
+    }
+    queue_cv_.notify_all();
+}
+
 void ThreadPool::shutdown()
 {
     bool expected = true;

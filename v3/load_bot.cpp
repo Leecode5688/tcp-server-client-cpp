@@ -164,7 +164,7 @@ int main(int argc, char** argv)
             break;
         }
 
-        std::this_thread::sleep_for(std::chrono::milliseconds(111));
+        std::this_thread::sleep_for(std::chrono::milliseconds(131));
     }
 
     close(sock_fd);

@@ -25,5 +25,6 @@ public:
     ThreadPool(size_t n_workers, int notify_fd);
     ~ThreadPool();
     void push_task(std::function<void()> task);    
+    void push_batch(std::vector<std::function<void()>>& tasks);
     void shutdown();
 };
