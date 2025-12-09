@@ -69,8 +69,14 @@ struct Connection {
 
     std::unique_ptr<IProtocolCodec> codec;
 
+    double tokens = 10.0;
+    double max_tokens = 10.0;
+    double refill_rate = 1.0;
+    std::chrono::steady_clock::time_point last_refill_time;
+
     explicit Connection(int fd_) : sock(fd_) {
         last_msg_time = std::chrono::steady_clock::now();
+        last_refill_time = std::chrono::steady_clock::now();
         update_activity();
     }
 

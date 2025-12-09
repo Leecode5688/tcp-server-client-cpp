@@ -40,6 +40,9 @@
 //max events to process per epoll loop
 #define GLOBAL_BATCH_SIZE 100
 
+#define BATCH_FLUSH_THRESHOLD 4096
+
+
 //setup functions
 void WebServer::setup_timerfd()
 {
@@ -51,10 +54,10 @@ void WebServer::setup_timerfd()
     }
 
     struct itimerspec ts;
-    ts.it_value.tv_sec = 60;
-    ts.it_value.tv_nsec = 0;
-    ts.it_interval.tv_sec = 60;
-    ts.it_interval.tv_nsec = 0;
+    ts.it_value.tv_sec = 0;
+    ts.it_value.tv_nsec = 10 * 1000000;
+    ts.it_interval.tv_sec = 0;
+    ts.it_interval.tv_nsec = 10 * 1000000;
 
     if(timerfd_settime(timer_fd_, 0, &ts, nullptr) == -1)
     {
@@ -308,6 +311,9 @@ void WebServer::SendPreEncoded(ConnPtr conn, std::shared_ptr<std::vector<char>> 
     std::lock_guard<std::mutex> lk(conn->mtx);
     if(conn->closed) return;
 
+    bool was_empty = (conn->outgoing_queue.empty() && !conn->is_write_armed);
+
+
     OutgoingPacket pkt;
     pkt.payload = packet;
 
@@ -320,7 +326,28 @@ void WebServer::SendPreEncoded(ConnPtr conn, std::shared_ptr<std::vector<char>> 
         conn->is_reading_paused = true;
     }
 
-    attempt_write(conn);
+    if(conn->pending_bytes > BATCH_FLUSH_THRESHOLD || conn->is_write_armed || was_empty)
+    {
+        attempt_write(conn);
+        uint32_t events = conn->current_epoll_events;
+        if(!conn->outgoing_queue.empty())
+        {
+            if(!conn->is_write_armed)
+            {
+                events |= EPOLLOUT;
+                conn->is_write_armed = true;
+            }
+        }
+        else
+        {
+            if(conn->is_write_armed)
+            {
+                events &= ~EPOLLOUT;
+                conn->is_write_armed = false;
+            }
+        }
+        update_epoll_events(conn, events);
+    }
 
     uint32_t events = 0;
 
@@ -341,9 +368,37 @@ void WebServer::SendPreEncoded(ConnPtr conn, std::shared_ptr<std::vector<char>> 
     update_epoll_events(conn, events);
 }
 
+//timer callback to flush all queues
+void WebServer::flush_all_queues()
+{
+    std::vector<ConnPtr> active_conns;
+    {
+        std::shared_lock<std::shared_mutex> map_lk(conn_map_mtx_);
+        for(const auto& pair : connections_)
+        {
+            ConnPtr conn = pair.second;
+            if(!conn || conn->closed.load()) continue;
+            active_conns.push_back(conn);
+        }
+    }
+
+    for(const auto& conn : active_conns)
+    {
+        if(conn->closed.load() || conn->outgoing_queue.empty()) continue;
+        std::unique_lock<std::mutex> lk(conn->mtx, std::try_to_lock);
+        if(!lk.owns_lock()) continue;
+        if(conn->closed.load() || conn->outgoing_queue.empty()) continue;
+        attempt_write(conn);
+        if(!conn->outgoing_queue.empty() && !conn->is_write_armed)
+        {
+            update_epoll_events(conn, conn->current_epoll_events | EPOLLOUT);
+            conn->is_write_armed = true;
+        }
+    }
+}
+
 void WebServer::process_global_queue()
 {
-    //fast swap
     std::deque<BroadcastEvent> events;
     {
         std::lock_guard<std::mutex> lk(global_queue_mtx_);
@@ -351,97 +406,123 @@ void WebServer::process_global_queue()
         events.swap(global_queue_);
     }
 
-    //process events
-    for(const auto& evt : events)
+    //snapshot of active connections
+    std::vector<ConnPtr> active_conns;
     {
-        //cache to store the encoded bytes for each codec type
-        std::unordered_map<std::type_index, std::shared_ptr<std::vector<char>>> encoded_cache;
-    
-        //vector to hold all tasks for this specific broadcast event
-        std::vector<std::function<void()>> batch_tasks;
-        batch_tasks.reserve(connections_.size());
-
-        //iterate connections and prepare tasks
+        std::shared_lock<std::shared_mutex> map_lk(conn_map_mtx_);
+        active_conns.reserve(connections_.size());
+        for(const auto& pair : connections_)
         {
-            std::shared_lock<std::shared_mutex> map_lock(conn_map_mtx_);
-            for(auto& pair : connections_)
+            if(pair.second && !pair.second->closed.load() && pair.second->is_broadcast_recipient)
             {
-                ConnPtr conn = pair.second;
-                if(!conn || conn->closed.load()) continue;
-                if(!conn->is_broadcast_recipient) continue;
-                if(evt.sender_fd != -1 && conn->fd() == evt.sender_fd) continue;
-                if(!conn->codec) continue;
+                active_conns.push_back(pair.second);
+            }
+        }
+    }
 
-                std::type_index type_idx(typeid(*conn->codec));
+    //precalculate encoded frames
+    struct EncodedBatchItem
+    {
+        int sender_fd;
+        std::shared_ptr<std::vector<char>> payload;
+    };
 
-                if(encoded_cache.find(type_idx) == encoded_cache.end())
+    std::unordered_map<std::type_index, std::vector<EncodedBatchItem>> encoded_cache;
+
+    std::vector<std::function<void()>> batch_tasks;
+    batch_tasks.reserve(active_conns.size());
+
+    for(const auto& conn : active_conns)
+    {
+        if(!conn->codec) continue;
+        std::type_index type_idx(typeid(*conn->codec));
+
+        if(encoded_cache.find(type_idx) == encoded_cache.end())
+        {
+            auto& cache_list = encoded_cache[type_idx];
+            cache_list.reserve(events.size());
+            for(const auto& evt : events)
+            {
+                try
                 {
-                    try
-                    {
-                        auto raw_bytes = conn->codec->encode(*evt.payload);
-                        encoded_cache[type_idx] = std::make_shared<std::vector<char>>(std::move(raw_bytes));
-                    }
-                    catch(const std::exception& e)
-                    {
-                        LOG_ERROR("Encoding failed during broadcast: " + std::string(e.what()));
-                        std::cerr<<"[Error] Encoding failed during broadcast: " << e.what() << std::endl;
-                        continue;
-                    }
+                    auto raw_bytes = conn->codec->encode(*evt.payload);
+                    auto shared_bytes = std::make_shared<std::vector<char>>(std::move(raw_bytes));
+                    cache_list.push_back({evt.sender_fd, shared_bytes});
                 }
-
-                auto shared_payload = encoded_cache[type_idx];
-
-                //create task, offload to worker
-                batch_tasks.emplace_back([this, conn, shared_payload]()
+                catch(const std::exception& e)
                 {
-                    //lock the individual connection
-                    std::lock_guard<std::mutex> conn_lk(conn->mtx);
-
-                    if(conn->closed.load()) return;
-                    
-                    //flow control
-                    if(conn->outgoing_queue.size() >= MAX_OUTGOING_QUEUE_SIZE)
-                    {
-                        LOG_ERROR("Dropping broadcast to fd " + std::to_string(conn->fd()) + " due to full outgoing queue");
-                        METRICS.on_message_dropped();
-                        return;
-                    }
-                    
-                    OutgoingPacket pkt;
-                    pkt.payload = shared_payload;
-                    pkt.sent_offset = 0;
-
-                    conn->outgoing_queue.push_back(std::move(pkt));
-                    conn->pending_bytes += shared_payload->size();
-
-                    this->attempt_write(conn);
-
-                    if(!conn->outgoing_queue.empty())
-                    {
-                        if(!conn->is_write_armed)
-                        {
-                            uint32_t events = conn->current_epoll_events | EPOLLOUT;
-                            this->update_epoll_events(conn, events);
-                            conn->is_write_armed = true;
-                        }
-                    }
-                    else
-                    {
-                        if(conn->is_write_armed)
-                        {
-                            uint32_t events = conn->current_epoll_events & ~EPOLLOUT;
-                            this->update_epoll_events(conn, events);
-                            conn->is_write_armed = false;
-                        }
-                    }    
-                });
+                    LOG_ERROR("Encoding failed during broadcast: " + std::string(e.what()));
+                    std::cerr<<"[Error] Encoding failed during broadcast: " << e.what() << std::endl;
+                    continue;
+                }
             }
         }
 
-        if(!batch_tasks.empty())
+        auto msg_for_user = encoded_cache[type_idx];
+        if(msg_for_user.empty()) continue;
+        batch_tasks.emplace_back([this, conn, msg_for_user]()
         {
-            threadpool_->push_batch(batch_tasks);
-        }
+            std::lock_guard<std::mutex> conn_lk(conn->mtx);
+            if(conn->closed.load()) return;
+
+            bool added_any = false;
+            bool was_empty = (conn->outgoing_queue.empty() && !conn->is_write_armed);
+
+            for(const auto& item : msg_for_user)
+            {
+                if(item.sender_fd != -1 && conn->fd() == item.sender_fd) continue;
+
+                //flow control
+                if(conn->outgoing_queue.size() >= MAX_OUTGOING_QUEUE_SIZE)
+                {
+                    LOG_ERROR("Dropping broadcast to fd " + std::to_string(conn->fd()) + " due to full outgoing queue");
+                    METRICS.on_message_dropped();
+                    break;
+                }
+                
+                OutgoingPacket pkt;
+                pkt.payload = item.payload;
+                pkt.sent_offset = 0;
+
+                conn->outgoing_queue.push_back(std::move(pkt));
+                conn->pending_bytes += item.payload->size();
+                added_any = true;
+            }
+
+            if(!added_any) return;
+
+            if(!conn->is_reading_paused && conn->pending_bytes >= HIGH_WATER_MARK)
+            {
+                conn->is_reading_paused = true;
+            }
+
+            if(conn->pending_bytes > BATCH_FLUSH_THRESHOLD || conn->is_write_armed || was_empty)
+            {
+                this->attempt_write(conn);
+                uint32_t events = conn->current_epoll_events;
+                if(!conn->outgoing_queue.empty())
+                {
+                    if(!conn->is_write_armed)
+                    {
+                        events |= EPOLLOUT;
+                        conn->is_write_armed = true;
+                    }
+                }
+                else
+                {
+                    if(conn->is_write_armed)
+                    {
+                        events &= ~EPOLLOUT;
+                        conn->is_write_armed = false;
+                    }
+                }
+                this->update_epoll_events(conn, events);
+            }
+        });
+    }
+    if(!batch_tasks.empty())
+    {
+        threadpool_->push_batch(batch_tasks);
     }
 }
 
@@ -677,11 +758,13 @@ void WebServer::Run()
 {
     LOG_INFO("Server listening on port " + std::to_string(port_) + "...");    
     struct epoll_event events[MAX_EVENTS];
+    static uint64_t ticks = 0;
+    static uint64_t stats_timer_accumulator = 0;
 
     while(running_)
     {
-        //wait 1000ms max to allow periodic tasks
-        int nfds = epoll_wait(epoll_fd_, events, MAX_EVENTS, -1);
+        int nfds = epoll_wait(epoll_fd_, events, MAX_EVENTS, 100);
+
         if(nfds == -1)
         {
             if(errno == EINTR) continue;
@@ -702,9 +785,17 @@ void WebServer::Run()
             {
                 uint64_t expirations;
                 read(timer_fd_, &expirations, sizeof(expirations));
+                
+                flush_all_queues();
+                stats_timer_accumulator += expirations;
+                ticks += expirations;
 
-                check_timeouts();
-                METRICS.print_stats();
+                if(stats_timer_accumulator >= 6000)
+                {
+                    check_timeouts();
+                    METRICS.print_stats();
+                    stats_timer_accumulator = 0;
+                }
             }
             else if(fd == sig_fd_)
             {

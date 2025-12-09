@@ -8,6 +8,7 @@
 #include <thread>
 #include <chrono>
 #include <netdb.h>
+#include <random>
 
 
 #define PORT 8888
@@ -69,13 +70,25 @@ void discard_loop(int fd)
 
 int main(int argc, char** argv)
 {
-    if(argc != 2)
+    if(argc < 2 || argc > 3)
     {
-        std::cerr<<"Usage: "<<argv[0]<<" <username>"<<std::endl;
+        std::cerr << "Usage: " << argv[0] << " <username> [interval_ms]" << std::endl;
         return 1;
     }
 
     std::string username = argv[1];
+    int interval_ms = 1000;
+    if(argc >= 3)
+    {
+        try 
+        {
+            interval_ms = std::stoi(argv[2]);
+        }
+        catch(...)
+        {
+            std::cerr << "Invalid interval argument. Using default 1000ms." << std::endl;
+        }
+    }
     int sock_fd = socket(AF_INET, SOCK_STREAM, 0);
     if(sock_fd < 0)
     {
@@ -83,10 +96,6 @@ int main(int argc, char** argv)
         return 1;
     }
 
-    // sockaddr_in server_addr{};
-    // server_addr.sin_family = AF_INET;
-    // server_addr.sin_port = htons(PORT);
-    // inet_pton(AF_INET, SERVER_IP, &server_addr.sin_addr);
     struct addrinfo hints{}, *res;
     hints.ai_family = AF_INET;
     hints.ai_socktype = SOCK_STREAM;
@@ -94,7 +103,6 @@ int main(int argc, char** argv)
     std::string server_host = get_server_ip();
     int err = getaddrinfo(server_host.c_str(), std::to_string(PORT).c_str(), &hints, &res);
 
-    // if(connect(sock_fd, (struct sockaddr*)& server_addr, sizeof(server_addr)) < 0)
     if(err != 0)
     {
         std::cerr<<"getaddrinfo failed: "<<gai_strerror(err)<<std::endl;
@@ -155,7 +163,9 @@ int main(int argc, char** argv)
     render.detach();
 
     std::string spam_message = format_message("Hello from bot " + username + "!!");
-
+    std::random_device rd;
+    std::mt19937 gen(rd());
+    std::uniform_int_distribution<> jitter_dist(-interval_ms * 0.2, interval_ms * 0.2);
     while(true)
     {
         if(send(sock_fd, spam_message.data(), spam_message.size(), 0) < 0)
@@ -164,7 +174,10 @@ int main(int argc, char** argv)
             break;
         }
 
-        std::this_thread::sleep_for(std::chrono::milliseconds(131));
+        int variation = jitter_dist(gen);
+        int actual_sleep = interval_ms + variation;
+        if(actual_sleep < 10) actual_sleep = 10;
+        std::this_thread::sleep_for(std::chrono::milliseconds(actual_sleep));
     }
 
     close(sock_fd);

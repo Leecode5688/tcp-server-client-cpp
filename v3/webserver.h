@@ -38,6 +38,8 @@ private:
     void close_conn(ConnPtr conn);
     void check_timeouts();
 
+    void flush_all_queues();
+
     //return true if a fatal error occurred and connection should be closed
     bool attempt_write(ConnPtr conn);
 

@@ -61,26 +61,28 @@ public:
         {
             //spam check
             auto now = std::chrono::steady_clock::now();
-            auto duration = std::chrono::duration_cast<std::chrono::seconds>(now - conn->last_msg_time);
+            // auto duration = std::chrono::duration_cast<std::chrono::seconds>(now - conn->last_msg_time);
+            std::chrono::duration<double> elapsed = now - conn->last_refill_time;
+            double seconds = elapsed.count();
+            conn->tokens += seconds * conn->refill_rate;
+            if(conn->tokens > conn->max_tokens)
+            {
+                conn->tokens = conn->max_tokens;
+            }
 
-            if(duration.count() < 1)
+            conn->last_refill_time = now;
+
+            if(conn->tokens < 1.0)
             {
-                //still in the same second window
-                conn->message_count++;
-                if(conn->message_count > 10)
-                {
-                    std::string log_msg = "Spam detected from fd " + std::to_string(conn->fd()) + " username: " + conn->username;
-                    LOG_ERROR(log_msg);
-                    SendFast(conn, "[Server]: You are sending messages too quickly. Disconnecting...\n");
-                    server_.Close(conn);
-                    return;
-                }
+                
+                std::string log_msg = "Spam detected from fd " + std::to_string(conn->fd()) + " username: " + conn->username;
+                LOG_ERROR(log_msg);
+                SendFast(conn, "[Server]: You are sending messages too quickly, upgrade to premium! Disconnecting...\n");
+                server_.Close(conn);
+                return;   
             }
-            else
-            {
-                conn->message_count = 1;
-                conn->last_msg_time = now;
-            }
+            
+            conn->tokens -= 1.0;
 
             std::string text(raw_msg.begin(), raw_msg.end());
             if(conn->state == ConnState::AWAITING_USERNAME)
@@ -100,8 +102,6 @@ public:
                     conn->username = text;
                     conn->state = ConnState::ACTIVE;
                     conn->is_broadcast_recipient = true;
-                    // std::string reply = "[Server]: Username accepted!\n";
-                    // server_.Send(conn, {reply.begin(), reply.end()});
                     SendFast(conn, "[Server]: Username accepted! :)\n");
 
                     std::string join = "[Server]: " + text + " joined!\n";  
@@ -109,8 +109,6 @@ public:
                 }
                 else
                 {
-                    // std::string reply = "[Server]: Invalid or taken. Try again: ";
-                    // server_.Send(conn, {reply.begin(), reply.end()});
                     SendFast(conn, "[Server]: Invalid or taken. Try again: ");
                 }
             }
