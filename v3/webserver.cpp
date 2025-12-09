@@ -466,7 +466,6 @@ void WebServer::process_global_queue()
             if(conn->closed.load()) return;
 
             bool added_any = false;
-            bool was_empty = (conn->outgoing_queue.empty() && !conn->is_write_armed);
 
             for(const auto& item : msg_for_user)
             {
@@ -496,28 +495,13 @@ void WebServer::process_global_queue()
                 conn->is_reading_paused = true;
             }
 
-            if(conn->pending_bytes > BATCH_FLUSH_THRESHOLD || conn->is_write_armed || was_empty)
+            if(!conn->is_write_armed)
             {
-                this->attempt_write(conn);
-                uint32_t events = conn->current_epoll_events;
-                if(!conn->outgoing_queue.empty())
-                {
-                    if(!conn->is_write_armed)
-                    {
-                        events |= EPOLLOUT;
-                        conn->is_write_armed = true;
-                    }
-                }
-                else
-                {
-                    if(conn->is_write_armed)
-                    {
-                        events &= ~EPOLLOUT;
-                        conn->is_write_armed = false;
-                    }
-                }
+                uint32_t events = conn->current_epoll_events | EPOLLOUT;
                 this->update_epoll_events(conn, events);
+                conn->is_write_armed = true;
             }
+            
         });
     }
     if(!batch_tasks.empty())
