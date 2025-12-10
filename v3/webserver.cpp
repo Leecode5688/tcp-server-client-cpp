@@ -445,8 +445,12 @@ void WebServer::process_global_queue()
             {
                 try
                 {
-                    auto raw_bytes = conn->codec->encode(*evt.payload);
-                    auto shared_bytes = std::make_shared<std::vector<char>>(std::move(raw_bytes));
+                    // auto raw_bytes = conn->codec->encode(*evt.payload);
+                    // auto shared_bytes = std::make_shared<std::vector<char>>(std::move(raw_bytes));
+                    
+                    auto shared_bytes = buffer_pool_.acquire_shared();
+                    conn->codec->encode(*evt.payload, *shared_bytes);
+                    
                     cache_list.push_back({evt.sender_fd, shared_bytes});
                 }
                 catch(const std::exception& e)

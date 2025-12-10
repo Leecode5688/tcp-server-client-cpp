@@ -1,6 +1,7 @@
 #pragma once
 #include "connection.h"
 #include "threadpool.h"
+#include "object_pool.h"
 #include <unordered_map>
 #include <unordered_set>
 #include <shared_mutex>
@@ -72,6 +73,7 @@ private:
     int timer_fd_{-1};
 
     std::unique_ptr<ThreadPool> threadpool_;
+    ObjectPool<std::vector<char>> buffer_pool_;
 
     //map lock, protects the connections_ map 
     //use shared locks for lookkups and iteration, unique locks for adding and removing clients

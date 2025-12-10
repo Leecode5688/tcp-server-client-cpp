@@ -17,11 +17,26 @@ public:
 
     //convert a logical message into wire format
     virtual std::vector<char> encode(const std::vector<char>& msg) = 0;
+
+    virtual void encode(const std::vector<char>& msg, std::vector<char>& out) = 0;
 };
 
 //protocol 1: the original v3 protocol
 class LengthPrefixedCodec : public IProtocolCodec {
 public:
+    void encode(const std::vector<char>& msg, std::vector<char>& out) override
+    {
+        out.clear();
+        uint32_t packet_size = sizeof(uint32_t) + msg.size();
+        out.reserve(packet_size);
+
+        uint32_t net_len = htonl(msg.size());
+        const char* header = reinterpret_cast<const char*>(&net_len);
+
+        out.insert(out.end(), header, header + sizeof(uint32_t));
+        out.insert(out.end(), msg.begin(), msg.end());
+    }
+
     std::optional<std::vector<char>> decode(RingBuffer& buf) override 
     {
 
