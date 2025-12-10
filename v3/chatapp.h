@@ -59,6 +59,8 @@ public:
         //handle login or broadcast
         server_.OnMessageRecv = [this](ConnPtr conn, std::vector<char> raw_msg)
         {
+            std::unique_lock<std::mutex> lk(conn->mtx);
+            if(conn->closed.load()) return;
             //spam check
             auto now = std::chrono::steady_clock::now();
             // auto duration = std::chrono::duration_cast<std::chrono::seconds>(now - conn->last_msg_time);
@@ -74,7 +76,8 @@ public:
 
             if(conn->tokens < 1.0)
             {
-                
+                lk.unlock();
+
                 std::string log_msg = "Spam detected from fd " + std::to_string(conn->fd()) + " username: " + conn->username;
                 LOG_ERROR(log_msg);
                 SendFast(conn, "[Server]: You are sending messages too quickly, upgrade to premium! Disconnecting...\n");
@@ -99,9 +102,14 @@ public:
 
                 if(success)
                 {
+
                     conn->username = text;
                     conn->state = ConnState::ACTIVE;
                     conn->is_broadcast_recipient = true;
+                    
+                    lk.unlock();
+
+
                     SendFast(conn, "[Server]: Username accepted! :)\n");
 
                     std::string join = "[Server]: " + text + " joined!\n";  
@@ -109,6 +117,8 @@ public:
                 }
                 else
                 {
+                    lk.unlock();
+
                     SendFast(conn, "[Server]: Invalid or taken. Try again: ");
                 }
             }
@@ -116,6 +126,9 @@ public:
             {
                 //normal chat
                 std::string chat = "[" + conn->username + "]: " + text + "\n";
+
+                lk.unlock();
+
                 server_.Broadcast({chat.begin(), chat.end()}, conn->fd());
             }
         };

@@ -1,6 +1,6 @@
 cmake_minimum_required(VERSION 3.10)
 
-project(ReactorServer VERSION 3.1 LANGUAGES CXX)
+project(ReactorServer VERSION 3.2 LANGUAGES CXX)
 
 set(CMAKE_CXX_STANDARD 17)
 set(CMAKE_CXX_STANDARD_REQUIRED ON)
@@ -12,9 +12,11 @@ set(SERVER_SOURCES
     threadpool.cpp
     webserver.cpp)
 
+find_package(PkgConfig REQUIRED)
+
 add_executable(chat_server ${SERVER_SOURCES})
 find_package(Threads REQUIRED)
-target_link_libraries(chat_server PRIVATE Threads::Threads)
+target_link_libraries(chat_server PRIVATE Threads::Threads jemalloc)
 
 #------------ FOR CLIENT --------------
 add_executable(chat_client

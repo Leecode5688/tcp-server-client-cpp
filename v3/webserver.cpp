@@ -69,7 +69,7 @@ void WebServer::setup_timerfd()
 }
 
 WebServer::WebServer(int port, int n_workers) : 
-    port_(port), n_workers_(n_workers), running_(true)
+    shards_(NUM_SHARDS), port_(port), n_workers_(n_workers), running_(true)
 {
     setup_signalfd();
     setup_server_socket();
@@ -371,28 +371,36 @@ void WebServer::SendPreEncoded(ConnPtr conn, std::shared_ptr<std::vector<char>> 
 //timer callback to flush all queues
 void WebServer::flush_all_queues()
 {
-    std::vector<ConnPtr> active_conns;
+    for(size_t i = 0; i < shards_.size(); ++i)
     {
-        std::shared_lock<std::shared_mutex> map_lk(conn_map_mtx_);
-        for(const auto& pair : connections_)
+        std::vector<ConnPtr> active_conns_in_shard;
         {
-            ConnPtr conn = pair.second;
-            if(!conn || conn->closed.load()) continue;
-            active_conns.push_back(conn);
+            std::shared_lock<std::shared_mutex> lk(shards_[i].mtx);
+            for(const auto& pair : shards_[i].connections)
+            {
+                ConnPtr conn = pair.second;
+                if(!conn || conn->closed.load()) continue;
+                if(!conn->outgoing_queue.empty())
+                {
+                    active_conns_in_shard.push_back(conn);
+                }
+            }
         }
-    }
 
-    for(const auto& conn : active_conns)
-    {
-        if(conn->closed.load() || conn->outgoing_queue.empty()) continue;
-        std::unique_lock<std::mutex> lk(conn->mtx, std::try_to_lock);
-        if(!lk.owns_lock()) continue;
-        if(conn->closed.load() || conn->outgoing_queue.empty()) continue;
-        attempt_write(conn);
-        if(!conn->outgoing_queue.empty() && !conn->is_write_armed)
+        for(const auto& conn : active_conns_in_shard)
         {
-            update_epoll_events(conn, conn->current_epoll_events | EPOLLOUT);
-            conn->is_write_armed = true;
+            if(conn->closed.load()) continue;
+
+            std::unique_lock<std::mutex> lk(conn->mtx, std::try_to_lock);
+            if(!lk.owns_lock()) continue;
+
+            if(conn->closed.load() || conn->outgoing_queue.empty()) continue;
+            attempt_write(conn);
+            if(!conn->outgoing_queue.empty() && !conn->is_write_armed)
+            {
+                update_epoll_events(conn, conn->current_epoll_events | EPOLLOUT);
+                conn->is_write_armed = true;
+            }
         }
     }
 }
@@ -406,21 +414,6 @@ void WebServer::process_global_queue()
         events.swap(global_queue_);
     }
 
-    //snapshot of active connections
-    std::vector<ConnPtr> active_conns;
-    {
-        std::shared_lock<std::shared_mutex> map_lk(conn_map_mtx_);
-        active_conns.reserve(connections_.size());
-        for(const auto& pair : connections_)
-        {
-            if(pair.second && !pair.second->closed.load() && pair.second->is_broadcast_recipient)
-            {
-                active_conns.push_back(pair.second);
-            }
-        }
-    }
-
-    //precalculate encoded frames
     struct EncodedBatchItem
     {
         int sender_fd;
@@ -430,82 +423,80 @@ void WebServer::process_global_queue()
     std::unordered_map<std::type_index, std::vector<EncodedBatchItem>> encoded_cache;
 
     std::vector<std::function<void()>> batch_tasks;
-    batch_tasks.reserve(active_conns.size());
+    batch_tasks.reserve(shards_.size());
 
-    for(const auto& conn : active_conns)
+    for(size_t i = 0; i < shards_.size(); ++i)
     {
-        if(!conn->codec) continue;
-        std::type_index type_idx(typeid(*conn->codec));
+        auto events_copy = std::make_shared<std::deque<BroadcastEvent>>(events);
 
-        if(encoded_cache.find(type_idx) == encoded_cache.end())
+        batch_tasks.emplace_back([this, i, events_copy]()
         {
-            auto& cache_list = encoded_cache[type_idx];
-            cache_list.reserve(events.size());
-            for(const auto& evt : events)
+            std::vector<ConnPtr> shard_active_conns;
             {
-                try
+                std::shared_lock<std::shared_mutex> lk(shards_[i].mtx);
+                shard_active_conns.reserve(shards_[i].connections.size());
+
+                for(const auto& pair : shards_[i].connections)
                 {
-                    // auto raw_bytes = conn->codec->encode(*evt.payload);
-                    // auto shared_bytes = std::make_shared<std::vector<char>>(std::move(raw_bytes));
-                    
-                    auto shared_bytes = buffer_pool_.acquire_shared();
-                    conn->codec->encode(*evt.payload, *shared_bytes);
-                    
-                    cache_list.push_back({evt.sender_fd, shared_bytes});
-                }
-                catch(const std::exception& e)
-                {
-                    LOG_ERROR("Encoding failed during broadcast: " + std::string(e.what()));
-                    std::cerr<<"[Error] Encoding failed during broadcast: " << e.what() << std::endl;
-                    continue;
+                    if(pair.second && !pair.second->closed.load() && pair.second->is_broadcast_recipient)
+                    {
+                        shard_active_conns.push_back(pair.second);
+                    }
                 }
             }
-        }
 
-        auto msg_for_user = encoded_cache[type_idx];
-        if(msg_for_user.empty()) continue;
-        batch_tasks.emplace_back([this, conn, msg_for_user]()
-        {
-            std::lock_guard<std::mutex> conn_lk(conn->mtx);
-            if(conn->closed.load()) return;
+            if(shard_active_conns.empty()) return;
 
-            bool added_any = false;
-
-            for(const auto& item : msg_for_user)
+            for(const auto& conn : shard_active_conns)
             {
-                if(item.sender_fd != -1 && conn->fd() == item.sender_fd) continue;
-
-                //flow control
-                if(conn->outgoing_queue.size() >= MAX_OUTGOING_QUEUE_SIZE)
+                std::lock_guard<std::mutex> conn_lk(conn->mtx);
+                if(conn->closed.load()) continue;
+                bool added_any = false;
+                for(const auto& evt : *events_copy)
                 {
-                    LOG_ERROR("Dropping broadcast to fd " + std::to_string(conn->fd()) + " due to full outgoing queue");
-                    METRICS.on_message_dropped();
-                    break;
+                    if(evt.sender_fd != -1 && conn->fd() == evt.sender_fd) continue;
+
+                    if(conn->outgoing_queue.size() >= MAX_OUTGOING_QUEUE_SIZE) 
+                    {
+                        //log once per burst to avoid log spamming
+                         if (conn->outgoing_queue.size() == MAX_OUTGOING_QUEUE_SIZE) 
+                         {
+                             LOG_ERROR("Dropping broadcast to fd " + std::to_string(conn->fd()));
+                             METRICS.on_message_dropped();
+                         }
+                        break;
+                    }
+
+
+                    auto packet = std::make_shared<std::vector<char>>();
+                    conn->codec->encode(*evt.payload, *packet);
+
+                    OutgoingPacket pkt;
+                    pkt.payload = packet;
+                    pkt.sent_offset = 0;
+
+                    conn->outgoing_queue.push_back(std::move(pkt));
+                    conn->pending_bytes += packet->size();
+                    added_any = true;   
                 }
                 
-                OutgoingPacket pkt;
-                pkt.payload = item.payload;
-                pkt.sent_offset = 0;
+                if(added_any) 
+                {
+                    if(!conn->is_reading_paused && conn->pending_bytes >= HIGH_WATER_MARK)
+                    {
+                        conn->is_reading_paused = true;
+                    }
 
-                conn->outgoing_queue.push_back(std::move(pkt));
-                conn->pending_bytes += item.payload->size();
-                added_any = true;
+                    attempt_write(conn);
+                    
+                    if(!conn->outgoing_queue.empty() && !conn->is_write_armed)
+                    {
+                        uint32_t events = conn->current_epoll_events | EPOLLOUT;
+                        this->update_epoll_events(conn, events);
+                        conn->is_write_armed = true;
+                    }
+                }
             }
-
-            if(!added_any) return;
-
-            if(!conn->is_reading_paused && conn->pending_bytes >= HIGH_WATER_MARK)
-            {
-                conn->is_reading_paused = true;
-            }
-
-            if(!conn->is_write_armed)
-            {
-                uint32_t events = conn->current_epoll_events | EPOLLOUT;
-                this->update_epoll_events(conn, events);
-                conn->is_write_armed = true;
-            }
-            
         });
     }
     if(!batch_tasks.empty())
@@ -551,9 +542,15 @@ void WebServer::accept_loop()
         set_tcp_nodelay(client_fd);
 
         ConnPtr conn = std::make_shared<Connection>(client_fd);
+        size_t shard_idx = get_shard_idx(client_fd);
         {
-            std::lock_guard<std::shared_mutex> lk(conn_map_mtx_);
-            connections_[client_fd] = conn;
+            std::lock_guard<std::shared_mutex> lk(shards_[shard_idx].mtx);
+            // connections_[client_fd] = conn;
+            shards_[shard_idx].connections[client_fd] = conn;
+
+            //add initial timer event (current time + timeout)
+            auto expiry = std::chrono::steady_clock::now() + std::chrono::seconds(CONNECTION_TIMEOUT_SEC);
+            shards_[shard_idx].timer_heap.push({expiry, client_fd});
         }
 
         add_fd_to_epoll(conn->fd(), EPOLLIN);
@@ -566,7 +563,7 @@ void WebServer::accept_loop()
         inet_ntop(AF_INET, &client_addr.sin_addr, ip, sizeof(ip));
 
         LOG_INFO("Accepted "+ std::string(ip) + ":" + std::to_string(ntohs(client_addr.sin_port))
-            + " fd = " + std::to_string(client_fd));
+            + " fd = " + std::to_string(client_fd) + " [Shard " + std::to_string(shard_idx) + "]");;
 
         if(OnClientConnect)
         {
@@ -705,10 +702,12 @@ void WebServer::close_conn(ConnPtr conn)
     }
 
     epoll_ctl(epoll_fd_, EPOLL_CTL_DEL, conn->fd(), nullptr);
-    // close(conn->fd());
+    size_t shard_idx = get_shard_idx(conn->fd());
     {
-        std::unique_lock<std::shared_mutex> lk(conn_map_mtx_);
-        connections_.erase(conn->fd());
+        // std::unique_lock<std::shared_mutex> lk(conn_map_mtx_);
+        std::unique_lock<std::shared_mutex> lk(shards_[shard_idx].mtx);
+        // connections_.erase(conn->fd());
+        shards_[shard_idx].connections.erase(conn->fd());
     }
     LOG_INFO("Closed fd = " + std::to_string(conn->fd()));
 }
@@ -718,14 +717,34 @@ void WebServer::check_timeouts()
 {
     auto now = std::chrono::steady_clock::now();
     std::vector<ConnPtr> timed_out;
+
+    //iterate all shards
+    for(size_t i = 0; i < shards_.size(); ++i)
     {
-        std::shared_lock<std::shared_mutex> lk(conn_map_mtx_);
-        for(auto& pair : connections_)
+        std::unique_lock<std::shared_mutex> lk(shards_[i].mtx);
+        auto& heap = shards_[i].timer_heap;
+
+        while(!heap.empty())
         {
-            auto diff = now - pair.second->last_activity;
-            if(std::chrono::duration_cast<std::chrono::seconds>(diff).count() > CONNECTION_TIMEOUT_SEC)
+            const auto& event = heap.top();
+            if(event.expires_at > now) break;
+
+            int fd = event.fd;
+            heap.pop();
+
+            auto it = shards_[i].connections.find(fd);
+            if(it == shards_[i].connections.end()) continue;
+
+            ConnPtr conn = it->second;
+            auto last_active = conn->last_activity;
+            auto expected_expiry = last_active + std::chrono::seconds(CONNECTION_TIMEOUT_SEC);
+            if(expected_expiry > now)
             {
-                timed_out.push_back(pair.second);
+                heap.push({expected_expiry, fd});
+            }
+            else
+            {
+                timed_out.push_back(conn);
             }
         }
     }
@@ -803,10 +822,12 @@ void WebServer::Run()
             else
             {
                 ConnPtr conn;
+
+                size_t shard_idx = get_shard_idx(fd);
                 {
-                    std::shared_lock<std::shared_mutex> lk(conn_map_mtx_);
-                    auto it = connections_.find(fd);
-                    if(it != connections_.end())
+                    std::shared_lock<std::shared_mutex> lk(shards_[shard_idx].mtx);
+                    auto it = shards_[shard_idx].connections.find(fd);
+                    if(it != shards_[shard_idx].connections.end())
                     {
                         conn = it->second;
                     }
@@ -844,9 +865,10 @@ void WebServer::Stop()
         threadpool_->shutdown();
     }
 
+    for(auto& shard : shards_)
     {
-        std::unique_lock<std::shared_mutex> lk(conn_map_mtx_);
-        connections_.clear();
+        std::unique_lock<std::shared_mutex> lk(shard.mtx);
+        shard.connections.clear();
     }
 
     if(listen_fd_ >= 0)

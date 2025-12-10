@@ -16,6 +16,7 @@
 
 //batch size for processing writes to avoid starving the read loop
 #define WRITE_BUDGET_PER_LOOP 100
+#define NUM_SHARDS 16
 
 class WebServer{
 private:
@@ -51,16 +52,32 @@ private:
         std::shared_ptr<std::vector<char>> payload;
     };
 
-
-    //handles the global write queue
-    // void handle_pending_writes();
-
     //worker tasks
     void handle_login_task(ConnPtr conn, std::string username);
 
-    // void handle_broadcast_task(ConnPtr sender_conn, std::shared_ptr<std::vector<char>> payload);
-
     void publish_to_global_queue(int sender_fd, std::string username, std::shared_ptr<std::vector<char>> payload, bool is_system = false);
+
+    struct TimerEvent {
+        std::chrono::steady_clock::time_point expires_at;
+        int fd;
+        bool operator>(const TimerEvent& other) const {
+            return expires_at > other.expires_at;
+        }
+    };
+
+    struct alignas(64) Shard {
+        std::unordered_map<int, ConnPtr> connections;
+        std::priority_queue<TimerEvent, std::vector<TimerEvent>, std::greater<TimerEvent>> timer_heap;
+
+        mutable std::shared_mutex mtx;
+    };
+
+    //collection of shards
+    std::vector<Shard> shards_;
+
+    size_t get_shard_idx(int fd) const {
+        return fd % shards_.size();
+    }
 
     int port_;
     int n_workers_;

@@ -69,8 +69,8 @@ struct Connection {
 
     std::unique_ptr<IProtocolCodec> codec;
 
-    double tokens = 10.0;
-    double max_tokens = 10.0;
+    double tokens = 60.0;
+    double max_tokens = 60.0;
     double refill_rate = 1.0;
     std::chrono::steady_clock::time_point last_refill_time;
 
