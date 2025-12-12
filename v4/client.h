@@ -4,15 +4,14 @@
 #include <termios.h>
 #include <thread>
 #include <mutex>
+#include "ringbuffer.h"
+#include "codec.h"
 #include "safe_queue.h"
 
 class Client {
 private:
     void setup_signalfd();
     void stop();
-    
-    // void handle_server_message();
-    // void handle_keyboard_input();
 
     //network => queue
     void receive_loop();
@@ -21,7 +20,8 @@ private:
     //keyboard => network
     void input_loop();
 
-    void process_buffer();
+    void handle_server_message(const chat::ServerMessage& msg);
+
     static void set_nonblocking(int fd);
     static void enable_raw_mode();
     static void disable_raw_mode();
@@ -32,11 +32,13 @@ private:
     int sig_fd_{-1}; 
 
     std::string username_;
+    std::string current_room_;
     std::string prompt_;
     std::string current_line_;
     std::mutex ui_mtx_;
 
-    std::string in_buf_; 
+    std::unique_ptr<ProtobufCodec> codec_;
+    RingBuffer in_buf_{8192};
     SafeQueue<std::string> message_queue_;
 
     std::thread receiver_thread_;

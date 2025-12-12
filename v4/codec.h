@@ -1,47 +1,17 @@
 #pragma once
 #include "ringbuffer.h"
+#include "chat.pb.h"
 #include <vector>
 #include <optional>
 #include <netinet/in.h>
 #include <cstring>
 #include <string>
 
-//abstract interface
-class IProtocolCodec {
+class PacketCodec {
 public: 
-    virtual ~IProtocolCodec() = default;
-
-    //try to decode a single message from the buffer
-    //returns std::mullopt if incomplete
-    virtual std::optional<std::vector<char>> decode(RingBuffer& buf) = 0;    
-
-    //convert a logical message into wire format
-    virtual std::vector<char> encode(const std::vector<char>& msg) = 0;
-
-    virtual void encode(const std::vector<char>& msg, std::vector<char>& out) = 0;
-};
-
-//protocol 1: the original v3 protocol
-class LengthPrefixedCodec : public IProtocolCodec {
-public:
-    void encode(const std::vector<char>& msg, std::vector<char>& out) override
+    std::optional<std::vector<char>> decode(RingBuffer& buf)
     {
-        out.clear();
-        uint32_t packet_size = sizeof(uint32_t) + msg.size();
-        out.reserve(packet_size);
-
-        uint32_t net_len = htonl(msg.size());
-        const char* header = reinterpret_cast<const char*>(&net_len);
-
-        out.insert(out.end(), header, header + sizeof(uint32_t));
-        out.insert(out.end(), msg.begin(), msg.end());
-    }
-
-    std::optional<std::vector<char>> decode(RingBuffer& buf) override 
-    {
-
-        //need at least 4 bytes for header
-        if(buf.size() < sizeof(uint32_t)) 
+        if(buf.size() < 4)
         {
             return std::nullopt;
         }
@@ -50,66 +20,66 @@ public:
         buf.peek(header, 4);
         uint32_t net_len;
         std::memcpy(&net_len, header, 4);
-        uint32_t payload_len = ntohl(net_len);
+        uint32_t len = ntohl(net_len);
 
-        //safety limit 10MB
-        if(payload_len > 10 * 1024 * 1024) 
+        //10mb limit
+        if(len > 10 * 1024 * 1024)
         {
-            //invalid message, drop buffer
-            buf.consume(buf.size());    
+            buf.consume(buf.size());
             return std::nullopt;
         }
 
-        //wait for full payload
-        if(buf.size() < sizeof(uint32_t) + payload_len)
+        if(buf.size() < 4 + len)
         {
             return std::nullopt;
         }
 
-        //extract message
-        buf.consume(sizeof(uint32_t));
-        std::vector<char> msg(payload_len);
-        buf.peek(msg.data(), payload_len);
-        buf.consume(payload_len);
-        
-        return msg;
-    }
+        buf.consume(4);
+        std::vector<char> payload(len);
+        buf.peek(payload.data(), len);
+        buf.consume(len);
 
-    std::vector<char> encode(const std::vector<char>& msg) override
-    {
-        std::vector<char> packet;
-        uint32_t net_len = htonl(msg.size());
-        packet.resize(sizeof(uint32_t) + msg.size());
-        std::memcpy(packet.data(), &net_len, 4);
-        std::memcpy(packet.data() + 4, msg.data(), msg.size());
-        return packet;
+        return payload;
     }
 };
 
-//protocol 2: simple delimiter-based protocol
-class LineBasedCodec : public IProtocolCodec {
+class ProtobufCodec {
 public: 
-    std::optional<std::vector<char>> decode(RingBuffer& buf) override 
+    template <typename T>
+    std::vector<char> encode(const T& msg)
     {
-        std::vector<char> temp(buf.size());
-        buf.peek(temp.data(), buf.size());
+        std::string payload;
+        msg.SerializeToString(&payload);
 
-        for(size_t i = 0; i < temp.size(); ++i)
-        {
-            if(temp[i] == '\n')
-            {
-                std::vector<char> line(temp.begin(), temp.begin() + i);
-                //consume line + '\n'
-                buf.consume(i+1);
-                return line;
-            }
-        }
-        return std::nullopt;
-    }
-    std::vector<char> encode(const std::vector<char>& msg) override
-    {
-        std::vector<char> packet = msg;
-        packet.push_back('\n');
+        std::vector<char> packet;
+        uint32_t len = htonl(static_cast<uint32_t>(payload.size()));
+        packet.resize(4 + payload.size());
+
+        std::memcpy(packet.data(), &len, 4);
+        std::memcpy(packet.data() + 4, payload.data(), payload.size());
         return packet;
+    }
+
+    template <typename T>
+    std::optional<T> decode(const std::vector<char>& data)
+    {
+        T msg;
+        if(!msg.ParseFromArray(data.data(), data.size()))
+        {
+            return std::nullopt;
+        }
+        return msg;
+    }
+
+    template <typename T>
+    std::optional<T> decode(RingBuffer& buf)
+    {
+        PacketCodec framer;
+        auto payload = framer.decode(buf);
+        if(!payload)
+        {
+            return std::nullopt;
+        }
+        return decode<T>(*payload);
     }
 };

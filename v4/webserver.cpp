@@ -431,8 +431,9 @@ void WebServer::process_global_queue()
                 std::lock_guard<std::mutex> conn_lk(conn->mtx);
                 if(conn->closed.load()) continue;
 
-                if(!conn->codec) continue;
-
+                
+                if(!conn->codec) conn->codec = std::make_unique<PacketCodec>();
+                
                 bool added_any = false;
                 for(const auto& evt : *events_copy)
                 {
@@ -450,15 +451,12 @@ void WebServer::process_global_queue()
                     }
 
 
-                    auto packet = std::make_shared<std::vector<char>>();
-                    conn->codec->encode(*evt.payload, *packet);
-
                     OutgoingPacket pkt;
-                    pkt.payload = packet;
+                    pkt.payload = evt.payload;
                     pkt.sent_offset = 0;
 
                     conn->outgoing_queue.push_back(std::move(pkt));
-                    conn->pending_bytes += packet->size();
+                    conn->pending_bytes += evt.payload->size();
                     added_any = true;   
                 }
                 
@@ -577,7 +575,8 @@ void WebServer::handle_read(ConnPtr conn)
                 //default codec if missing
                 if(!conn->codec)
                 {
-                    conn->codec = std::make_unique<LengthPrefixedCodec>();
+                    // conn->codec = std::make_unique<LengthPrefixedCodec>();
+                    conn->codec = std::make_unique<PacketCodec>();
                 }
                 
                 //loop through messages using the codec

@@ -24,7 +24,7 @@ struct Connection {
     //generic hook
     std::any user_data;
 
-    std::unique_ptr<IProtocolCodec> codec;
+    std::unique_ptr<PacketCodec> codec;
     RingBuffer in_buf{8192};
     std::deque<OutgoingPacket> outgoing_queue;
     size_t pending_bytes = 0;
