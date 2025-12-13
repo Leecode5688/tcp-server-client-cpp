@@ -36,10 +36,10 @@ add_executable(chat_client
 target_link_libraries(chat_client PRIVATE Threads::Threads ${Protobuf_LIBRARIES})
 target_include_directories(chat_client PRIVATE ${CMAKE_CURRENT_BINARY_DIR})
 #------------ FOR LOAD TESTER --------------
-# add_executable(load_bot 
-#                load_bot.cpp
-#                ${PROTO_SRCS}) 
-# target_link_libraries(load_bot PRIVATE 
-#                       Threads::Threads
-#                       ${Protobuf_LIBRARIES})
-# target_include_directories(load_bot PRIVATE ${CMAKE_CURRENT_BINARY_DIR})
+add_executable(load_bot 
+               load_bot.cpp
+               ${PROTO_SRCS}) 
+target_link_libraries(load_bot PRIVATE 
+                      Threads::Threads
+                      ${Protobuf_LIBRARIES})
+target_include_directories(load_bot PRIVATE ${CMAKE_CURRENT_BINARY_DIR})

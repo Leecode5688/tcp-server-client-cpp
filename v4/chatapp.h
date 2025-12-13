@@ -63,7 +63,12 @@ private:
             }
             case EventType::MESSAGE:
             {
-                HandleMessage(evt.conn, evt.payload);
+                // HandleMessage(evt.conn, evt.payload);
+                if(evt.payload)
+                {
+                    HandleMessage(evt.conn, *evt.payload);
+                }
+                
                 break;
             }
         }

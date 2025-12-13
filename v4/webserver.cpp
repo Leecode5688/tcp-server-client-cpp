@@ -393,14 +393,6 @@ void WebServer::process_global_queue()
         events.swap(global_queue_);
     }
 
-    struct EncodedBatchItem
-    {
-        int sender_fd;
-        std::shared_ptr<std::vector<char>> payload;
-    };
-
-    std::unordered_map<std::type_index, std::vector<EncodedBatchItem>> encoded_cache;
-
     std::vector<std::function<void()>> batch_tasks;
     batch_tasks.reserve(shards_.size());
 
@@ -449,7 +441,6 @@ void WebServer::process_global_queue()
                          }
                         break;
                     }
-
 
                     OutgoingPacket pkt;
                     pkt.payload = evt.payload;
@@ -589,8 +580,12 @@ void WebServer::handle_read(ConnPtr conn)
                     {
                         break;
                     }
-
-                    event_queue_.push({EventType::MESSAGE, conn, std::move(*msg_opt)});
+                    
+                    auto payload_ptr = buffer_pool_.acquire_shared();
+                    *payload_ptr = std::move(*msg_opt);
+                    METRICS.on_message_received();
+                    // event_queue_.push({EventType::MESSAGE, conn, std::move(*msg_opt)});
+                    event_queue_.push({EventType::MESSAGE, conn, payload_ptr});
                 }
             }
             else if(n == 0)
@@ -778,7 +773,6 @@ void WebServer::Run()
                 pending_broadcast = true;
                 uint64_t cnt;
                 read(notify_fd_, &cnt, sizeof(cnt));
-                // process_global_queue();
             }
             else
             {

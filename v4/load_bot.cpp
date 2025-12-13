@@ -9,47 +9,58 @@
 #include <chrono>
 #include <netdb.h>
 #include <random>
-
+#include "chat.pb.h"
 
 #define PORT 8888
-// #define SERVER_IP "127.0.0.1"
 #define BUFFER_SIZE 4096
 
-std::string format_message(const std::string& msg)
+bool send_proto(int sock_fd, const chat::ClientMessage& msg)
 {
-    uint32_t len = msg.size();
-    uint32_t net_len = htonl(len);
-    std::string packet;
-    packet.append(reinterpret_cast<const char*>(&net_len), sizeof(uint32_t));
-    packet.append(msg);
-    return packet;
+    std::string payload;
+    if(!msg.SerializeToString(&payload))
+    {
+        return false;
+    }
+
+    uint32_t len = htonl(static_cast<uint32_t>(payload.size()));
+
+    if(send(sock_fd, &len, sizeof(uint32_t), 0) != sizeof(uint32_t))
+    {
+        return false;
+    }
+
+    if(send(sock_fd, payload.data(), payload.size(), 0) != static_cast<ssize_t>(payload.size()))
+    {
+        return false;
+    }
+
+    return true;
 }
 
-std::string recv_message(int sock_fd)
+bool recv_proto(int sock_fd, chat::ServerMessage& out_msg)
 {
-    char header_buf[4];
-    if(recv(sock_fd, header_buf, 4, MSG_WAITALL) != 4)
+    char header[4];
+    ssize_t n = recv(sock_fd, header, sizeof(uint32_t), MSG_WAITALL);
+    if(n != sizeof(uint32_t))
     {
-        return "";
+        return false;
     }
 
     uint32_t net_len;
-    memcpy(&net_len, header_buf, sizeof(uint32_t));
-    uint32_t payload_len = ntohl(net_len);
-
-    if(payload_len > 8192)
+    std::memcpy(&net_len, header, sizeof(uint32_t));
+    uint32_t len = ntohl(net_len);
+    if(len > 10 * 1024 * 1024)
     {
-        std::cerr<<"Payload too large: "<<payload_len<<std::endl;
-        return "";
+        return false;
     }
 
-    std::vector<char> payload_buf(payload_len);
-    if(recv(sock_fd, payload_buf.data(), payload_len, MSG_WAITALL) != payload_len)
+    std::vector<char> buf(len);
+    n = recv(sock_fd, buf.data(), len, MSG_WAITALL);
+    if(n != static_cast<ssize_t>(len))
     {
-        return "";
+        return false;
     }
-
-    return std::string(payload_buf.begin(), payload_buf.end());
+    return out_msg.ParseFromArray(buf.data(), len);
 }
 
 const char* get_server_ip()
@@ -119,58 +130,48 @@ int main(int argc, char** argv)
 
     freeaddrinfo(res);
     
+    chat::ClientMessage login_msg;
+    login_msg.mutable_login()->set_username(username);
 
-    std::string welcome = recv_message(sock_fd);
-    if(welcome.empty())
+    if(!send_proto(sock_fd, login_msg))
     {
-        std::cerr<<"Bot "<<username<<": Did not receive welcone."<<std::endl;
+        std::cerr<<"Bot "<<username<<": Failed to send login message."<<std::endl;
         close(sock_fd);
         return 1;
     }
 
-    std::string user_packet = format_message(username);
-    if(send(sock_fd, user_packet.data(), user_packet.size(), 0) < 0)
-    {
-        perror("Bot send username failed!!");
+    chat::ServerMessage resp;
+    if (!recv_proto(sock_fd, resp)) {
+        std::cerr << "Bot " << username << ": Disconnected during login." << std::endl;
         close(sock_fd);
         return 1;
     }
 
-    int max_retries = 20;
-    bool logged_in = false;
-
-    while(max_retries-- > 0)
-    {
-        std::string msg = recv_message(sock_fd);
-        if(msg.empty()) break;
-
-        if(msg.find("Username accepted") != std::string::npos)
-        {
-            logged_in = true;
-            break;
-        }
-    }
-
-    if(!logged_in)
-    {
-        std::cerr<<"Bot "<<username<<": Login timed out or failed."<<std::endl;
+    if (!resp.has_login_response() || !resp.login_response().success()) {
+        std::cerr << "Bot " << username << ": Login failed." << std::endl;
         close(sock_fd);
         return 1;
     }
 
+    std::thread reader(discard_loop, sock_fd);
+    reader.detach();
+    // "render".detach(); stupid typo ^ ^
+    int msg_count = 0;
 
-    std::thread render(discard_loop, sock_fd);
-    render.detach();
-
-    std::string spam_message = format_message("Hello from bot " + username + "!!");
     std::random_device rd;
     std::mt19937 gen(rd());
     std::uniform_int_distribution<> jitter_dist(-interval_ms * 0.2, interval_ms * 0.2);
+    
     while(true)
     {
-        if(send(sock_fd, spam_message.data(), spam_message.size(), 0) < 0)
+        chat::ClientMessage chat_msg;
+        chat_msg.mutable_global_chat()->set_text(
+            "Hello from bot " + username + "!! Message #" + std::to_string(++msg_count)
+        );
+
+        if(!send_proto(sock_fd, chat_msg))
         {
-            perror("Bot send spam failed!!");
+            std::cerr<<"Bot "<<username<<": Failed to send chat message."<<std::endl;
             break;
         }
 

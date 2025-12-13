@@ -12,5 +12,6 @@ enum class EventType {
 struct NetworkEvent {
     EventType type;
     ConnPtr conn;
-    std::vector<char> payload;
+    // std::vector<char> payload;
+    std::shared_ptr<std::vector<char>> payload;
 };
